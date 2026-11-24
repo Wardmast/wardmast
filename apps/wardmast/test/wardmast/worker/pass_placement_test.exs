@@ -50,6 +50,19 @@ defmodule Wardmast.Worker.PassPlacementTest do
   describe "start_failed/4 (bd-3jjt3p)" do
     test "a placement timeout holds the pass: interrupted with placement_refused, not spawn_failed" do
       {:ok, worker} = Wardmast.Worker.start(task_id: "bd-pt-timeout", repo: "r")
+
+      # A finished worker stays registered and counts against the local cap:
+      # left running, it holds the only slot of a later cap-1 test
+      # (Wardmast.Test.ResumeSlotFixture).
+      on_exit(fn ->
+        try do
+          if Wardmast.Worker.whereis("bd-pt-timeout"),
+            do: Wardmast.Worker.stop("bd-pt-timeout", :normal)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
       node = %{id: "n1", name: "edge-1"}
 
       error =

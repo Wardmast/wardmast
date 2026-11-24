@@ -47,8 +47,9 @@ defmodule Wardmast.Release do
   end
 
   @doc """
-  Run the workspace-config data migrations (currently `rig_paths` →
-  `repo_paths`) without restarting the server.
+  Run the workspace-config data migrations (`rig_paths` → `repo_paths`, and the
+  deprecated root `sandbox` folded into `agent.security.sandbox`) without
+  restarting the server. Returns the `rig_paths` results.
 
   Called via `bin/wardmast eval Wardmast.Release.migrate_config`. Boot already
   runs these — `Wardmast.Boot.ConfigMigrator` — so a plain `arb server restart`
@@ -77,8 +78,24 @@ defmodule Wardmast.Release do
       results -> Enum.each(results, fn r -> IO.puts(format_config_result(r)) end)
     end
 
+    # bd-4j0nfe: the deprecated root `sandbox` key, folded into agent.security.sandbox.
+    case Wardmast.Boot.ConfigMigrator.migrate_root_sandbox() do
+      [] -> IO.puts("No workspace carries a root `sandbox` key — nothing to fold.")
+      folds -> Enum.each(folds, fn r -> IO.puts(format_sandbox_result(r)) end)
+    end
+
     results
   end
+
+  defp format_sandbox_result(%{status: :migrated} = r),
+    do:
+      "#{r.workspace}: folded root `sandbox` into agent.security.sandbox " <>
+        "(#{length(r.moved)} moved, #{length(r.dropped)} dropped: the canonical value won)"
+
+  defp format_sandbox_result(%{status: {:error, message}} = r),
+    do: "#{r.workspace}: root `sandbox` fold FAILED -- #{message}"
+
+  defp format_sandbox_result(r), do: "#{r.workspace}: #{inspect(r.status)}"
 
   defp format_config_result(%{status: :migrated} = r),
     do:
