@@ -8,18 +8,18 @@
 //! SHELL_RELEASE_DIR=/path/to/release cargo run -p arbiter-shell-core --bin headless
 //! ```
 //!
-//! Environment: `SHELL_SOCKET` (single-instance socket; default under
-//! `$XDG_RUNTIME_DIR`/tmp), `SHELL_RELEASE_DIR` (real release) or
+//! Environment: `SHELL_SOCKET` (single-instance socket; default in the app
+//! runtime dir), `SHELL_RELEASE_DIR` (real release) or
 //! `SHELL_RELEASE_PROGRAM` (any executable), `SHELL_PREFERRED_PORT` (default
 //! 4848), `SHELL_MAX_BOOT_FAILURES`, `SHELL_DATA_HOME` (pidfile/lock directory; off
 //! when unset), `SHELL_EXPECTED_VERSION`, `SHELL_API_TOKEN`, `SHELL_QUIT_ANSWER`
 //! (`yes`/`no`, default `yes`).
 //!
-//! Stdin commands: `close`, `quit`, `retry`, `answer yes|no`. EOF quits.
+//! Stdin commands: `close`, `quit`, `os-quit`, `retry`, `answer yes|no`. EOF quits.
 
 use arbiter_shell_core::credentials;
 use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
-use arbiter_shell_core::shell::{CloseAction, QuitOutcome, Shell};
+use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec, State, StopOutcome};
 use std::io::{self, BufRead, Write};
@@ -50,15 +50,6 @@ impl QuitPrompt for Prompt {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
-fn socket_path() -> PathBuf {
-    env("SHELL_SOCKET").map(PathBuf::from).unwrap_or_else(|| {
-        let base = env("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        base.join("arbiter-shell.sock")
-    })
 }
 
 fn config() -> Config {
@@ -106,7 +97,9 @@ fn config() -> Config {
 }
 
 fn main() {
-    let guard = match single_instance::acquire(&socket_path(), || say("focus-requested")) {
+    let guard = match single_instance::acquire(&single_instance::default_socket_path(), || {
+        say("focus-requested")
+    }) {
         Ok(Acquired::Primary(g)) => g,
         Ok(Acquired::Secondary) => {
             say("focused-existing-instance");
@@ -159,6 +152,22 @@ fn main() {
                     return;
                 }
             }
+            "os-quit" => match shell.on_exit_requested() {
+                ExitAction::AllowExit => {
+                    drop(guard);
+                    return;
+                }
+                ExitAction::PreventAndRequestQuit => {
+                    say("os-exit-prevented");
+                    if quit(&shell, &prompt) {
+                        let ExitAction::AllowExit = shell.on_exit_requested() else {
+                            unreachable!("exit must be approved after request_quit succeeds");
+                        };
+                        drop(guard);
+                        return;
+                    }
+                }
+            },
             _ => {}
         }
     }
