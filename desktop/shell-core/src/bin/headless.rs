@@ -23,6 +23,7 @@ use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec, State, StopOutcome};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

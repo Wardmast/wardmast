@@ -194,10 +194,7 @@ fn the_default_single_instance_socket_lives_in_the_app_runtime_dir() {
     let dir = workdir("runtime-dir");
     // Relative to the shell's cwd (`dir`), to stay under the sun_path limit.
     let runtime = dir.join("xdg");
-    let mut sh = Shell::launch(
-        &dir,
-        &[("SHELL_SOCKET", ""), ("XDG_RUNTIME_DIR", "xdg")],
-    );
+    let mut sh = Shell::launch(&dir, &[("SHELL_SOCKET", ""), ("XDG_RUNTIME_DIR", "xdg")]);
     sh.expect_line("dashboard ");
     assert!(
         runtime.join("arbiter").join("shell.sock").exists(),

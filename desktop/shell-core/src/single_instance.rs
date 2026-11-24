@@ -393,7 +393,13 @@ mod tests {
             PathBuf::from("/Users/u/.wardmast/run/shell.sock")
         );
         assert_eq!(
-            socket_path_from(None, None, Some(missing), None, Some(PathBuf::from("/Users/u"))),
+            socket_path_from(
+                None,
+                None,
+                Some(missing),
+                None,
+                Some(PathBuf::from("/Users/u"))
+            ),
             PathBuf::from("/Users/u/.wardmast/run/shell.sock")
         );
     }
