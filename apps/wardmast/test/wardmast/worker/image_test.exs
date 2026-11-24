@@ -183,25 +183,40 @@ defmodule Wardmast.Worker.ImageTest do
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
     end
 
-    test "restores live Debian apt sources after the pinned install so derived images can apt-get update" do
+    test "general packages come from live mirrors; snapshot is pinned to chromium only (bd-dgxrme)" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
       base = plan.base.containerfile
 
-      {before_install, after_install} =
-        base |> String.split("chromium=", parts: 2) |> then(fn [a, b] -> {a, b} end)
+      assert base =~ "'URIs: http://deb.debian.org/debian'"
+      assert base =~ "'URIs: http://deb.debian.org/debian-security'"
+      assert base =~ "> /etc/apt/sources.list.d/debian.sources"
+      assert base =~ "> /etc/apt/sources.list.d/chromium-snapshot.sources"
+      assert base =~ "'Check-Valid-Until: no'"
+      assert base =~ "'Package: chromium chromium-common chromium-sandbox'"
+      assert base =~ "'Pin: origin snapshot.debian.org'"
+      assert base =~ "'Pin-Priority: 1001'"
+      assert base =~ "'Package: *'"
+      assert base =~ "'Pin-Priority: -1'"
 
-      assert before_install =~ "snapshot.debian.org"
+      # The snapshot never lands in the general debian.sources file.
+      [live_part, _] = String.split(base, "> /etc/apt/sources.list.d/debian.sources", parts: 2)
+
+      [_, live_part] =
+        String.split(live_part, "FROM docker.io/library/debian:trixie-slim", parts: 2)
+
+      refute live_part =~ "snapshot.debian.org"
+    end
+
+    test "removes the snapshot source and pin so derived images can plain apt-get update" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
+      base = plan.base.containerfile
+
+      [_, after_install] = String.split(base, "chromium=", parts: 2)
+      assert after_install =~ "rm -f /etc/apt/sources.list.d/chromium-snapshot.sources"
+      assert after_install =~ "/etc/apt/preferences.d/chromium-snapshot"
       refute after_install =~ "snapshot.debian.org/archive"
-
-      assert after_install =~ "URIs: http://deb.debian.org/debian\n" or
-               after_install =~ "'URIs: http://deb.debian.org/debian'"
-
-      assert after_install =~ "'Suites: trixie trixie-updates'"
-      assert after_install =~ "URIs: http://deb.debian.org/debian-security'"
-      assert after_install =~ "'Suites: trixie-security'"
-      assert after_install =~ "> /etc/apt/sources.list.d/debian.sources"
-      # No frozen-snapshot escape hatch leaks into derived images.
       refute base =~ "apt.conf.d"
     end
   end
