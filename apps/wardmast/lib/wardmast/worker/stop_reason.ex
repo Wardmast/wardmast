@@ -1193,6 +1193,9 @@ defmodule Wardmast.Worker.StopReason do
   cluster (k8s) pod's exit carries `memory_limit` (set by `PodState`), so a present
   limit means `:cluster` (LimitRange / controller config) and anything else is a
   machine node's `podman --memory` cap, `:node`. Neither reports a peak after the kill.
+  Fallback: a cluster pod whose spec carries no worker memory limit (a LimitRange with
+  no default) is classified `:node`; `worker.limits.memory` defaults to 4Gi, so that
+  is not expected.
   """
   @spec remote_memory_cap_info(map(), String.t() | nil) :: %{
           max: String.t(),

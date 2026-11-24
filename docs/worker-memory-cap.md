@@ -248,10 +248,16 @@ check is the run transcript's last two commands.
 * Worker test default concurrency (`scripts/test_max_cases.exs`) is capped at 4,
   with a guard in `apps/wardmast_release_env/test/test_max_cases_test.exs`. This is
   **hygiene, not the fix**: the table above shows the BEAM's peak is nearly flat in
-  `max_cases`, so the cap does not lower the peak that caused the kills.
+  `max_cases`, so the cap does not lower the peak that caused the kills. What bounds
+  the default: `System.schedulers_online/0` defaults to the CPUs the BEAM may use,
+  i.e. its CPU affinity and, on OTP 23+, the cgroup `cpu_quota` (a 2-CPU pod gets 2
+  schedulers, so `max_cases` 2); the hard cap of 4 bounds it on a many-core host.
 * The failure remediation is node-kind aware: a cluster pod (its exit carries the
   pod's limit) is pointed at the LimitRange and controller config; a machine node
-  at its `podman run --memory` share (`remote_worker_memory_share`).
+  at its `podman run --memory` share (`remote_worker_memory_share`). Fallback: the
+  kind is inferred from whether the exit carries the pod's limit, so a cluster pod
+  whose spec has no worker memory limit (a LimitRange without a default) would get
+  the podman wording; `worker.limits.memory` defaults to 4Gi, so this is not expected.
 
 **Still to do, and not code:** raise the cluster limit (below) and/or serialise
 heavy BEAMs. That is the operator's call and is what actually addresses the kills.

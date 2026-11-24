@@ -18,6 +18,10 @@
 # ~2.0 GiB at 16, so concurrency barely moves the peak
 # (docs/worker-memory-cap.md, "Cluster pods"). It only stops a many-core host from
 # fanning out dozens of concurrent DB cases.
+#
+# What bounds the number: `System.schedulers_online/0` defaults to the CPUs the BEAM
+# may use, i.e. its CPU affinity and, on OTP 23+, the cgroup `cpu_quota` (a 2-CPU pod
+# gets 2 schedulers, so max_cases 2); the hard cap of 4 bounds it on a many-core host.
 fn env ->
   worker_default = fn -> [max_cases: min(4, max(2, div(System.schedulers_online(), 4)))] end
 
