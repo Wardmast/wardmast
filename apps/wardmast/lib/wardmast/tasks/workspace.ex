@@ -140,6 +140,7 @@ defmodule Wardmast.Tasks.Workspace do
         """
       end
 
+      change {Wardmast.Tasks.Workspace.Changes.RewriteDeprecatedConfigPaths, []}
       change {Wardmast.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Wardmast.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Wardmast.Tasks.Workspace.Changes.MergeWorkerEnv, []}
@@ -179,6 +180,7 @@ defmodule Wardmast.Tasks.Workspace do
         """
       end
 
+      change {Wardmast.Tasks.Workspace.Changes.RewriteDeprecatedConfigPaths, []}
       change {Wardmast.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Wardmast.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Wardmast.Tasks.Workspace.Changes.MergeWorkerEnv, []}
@@ -223,6 +225,7 @@ defmodule Wardmast.Tasks.Workspace do
         """
       end
 
+      change {Wardmast.Tasks.Workspace.Changes.RewriteDeprecatedConfigPaths, []}
       change {Wardmast.Tasks.Workspace.Changes.RejectSecretConfigKeys, []}
       change {Wardmast.Tasks.Workspace.Changes.RejectUnknownConfigKeys, []}
       change {Wardmast.Tasks.Workspace.Changes.PatchConfig, []}

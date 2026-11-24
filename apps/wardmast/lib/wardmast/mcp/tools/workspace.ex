@@ -18,6 +18,7 @@ defmodule Wardmast.MCP.Tools.Workspace do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Tasks.Workspace.ConfigPath
   alias Wardmast.Tasks.Workspace.ConfigSchema
+  alias Wardmast.Tasks.Workspace.DeprecatedConfigPaths
   alias Wardmast.Tasks.Workspace.Operations
 
   @install_settings_keys Wardmast.Settings.Registry.keys()
@@ -82,7 +83,13 @@ defmodule Wardmast.MCP.Tools.Workspace do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
       config = AttentionLimits.with_defaults(ws.config)
-      key = Tools.fetch_string(args, "key")
+
+      # bd-4j0nfe: a root `sandbox.*` reads the canonical key runs actually use.
+      {key, deprecations} =
+        case Tools.fetch_string(args, "key") do
+          nil -> {nil, []}
+          key -> DeprecatedConfigPaths.rewrite_path(key)
+        end
 
       value =
         if key do
@@ -101,7 +108,8 @@ defmodule Wardmast.MCP.Tools.Workspace do
            value: value,
            effective_merge_strategies: effective_merge_strategies(ws),
            secret_keys: workspace_secret_keys(ws)
-         }}
+         }
+         |> add_deprecation_warnings(deprecations)}
       end
     end
   end
@@ -203,7 +211,12 @@ defmodule Wardmast.MCP.Tools.Workspace do
            ) do
         {:ok, updated} ->
           {:ok,
-           updated |> serialize_workspace_config() |> add_git_credential_checks(updated, patch)}
+           updated
+           |> serialize_workspace_config()
+           |> add_git_credential_checks(updated, patch)
+           |> add_deprecation_warnings(
+             Ash.Resource.get_metadata(updated, :config_deprecations) || []
+           )}
 
         {:error, err} ->
           {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -245,6 +258,15 @@ defmodule Wardmast.MCP.Tools.Workspace do
 
         data |> Map.put(:git_credential_checks, checks) |> Map.put(:warnings, warnings)
     end
+  end
+
+  # bd-4j0nfe: a key under a deprecated root (`sandbox.*`) was read or written
+  # on its canonical path; say so beside any other `warnings`.
+  defp add_deprecation_warnings(data, []), do: data
+
+  defp add_deprecation_warnings(data, rewrites) do
+    warnings = Enum.map(rewrites, &DeprecatedConfigPaths.warning/1)
+    Map.update(data, :warnings, warnings, &(&1 ++ warnings))
   end
 
   defp git_credential_check(ws, repo) do
