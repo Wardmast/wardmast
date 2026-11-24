@@ -586,8 +586,9 @@ defmodule Wardmast.Trackers.Jira do
 
     add_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false), do: assign_user(ref, account_id)
-    :ok
+    if Map.get(ctx, :assign, false),
+      do: ref |> assign_user(account_id) |> Wardmast.Trackers.Tracker.assign_outcome(),
+      else: :ok
   end
 
   @impl true

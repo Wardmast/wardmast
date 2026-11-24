@@ -2384,15 +2384,18 @@ defmodule Wardmast.MCP.Catalog do
       name: "tracker_claim",
       tiers: @coordinator,
       description:
-        "Claim an external tracker issue into a ticket (`arb claim <issue#>`). Verifies the issue is " <>
-          "assigned to the workspace user (skip with `force: true`) and creates a linked ticket. " <>
+        "Claim an external tracker issue into a ticket (`arb claim <issue#>`). An UNASSIGNED issue is " <>
+          "simply claimed: the ticket is created and the issue is assigned to the workspace user on " <>
+          "the tracker (best effort — if that write fails the ticket is still created and the reply " <>
+          "carries `warnings`). An issue assigned to SOMEONE ELSE is refused (`not_assigned`), even " <>
+          "with `force: true`; `force` only skips the prior-claim check. " <>
           "Idempotent — returns the existing ticket if one already references the issue. " <>
           "`difficulty` and `issue_type` are otherwise derived from the issue's tracker labels " <>
           "where the adapter supports it (GitHub labels; Shortcut story_type and Priority field); " <>
           "`priority`, `issue_type`, `difficulty` and `repo` below " <>
           "override whatever would otherwise be derived or left unset (`difficulty` is checked " <>
           "against 0..5 before the tracker is called). Returns `{status: created | existing, " <>
-          "task}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403). " <>
+          "task, owner_changed, warnings?}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403). " <>
           "Bulk: pass `epic` (a tracker epic id) or `query` (a tracker search) instead of `ref` to claim " <>
           "every match — a dry-run preview unless `yes: true`; already-claimed stories are reported " <>
           "`existing`, never duplicated; returns `{applied, data: [{ref, title, url, status: " <>
@@ -2423,13 +2426,17 @@ defmodule Wardmast.MCP.Catalog do
           },
           "force" => %{
             "type" => "boolean",
-            "description" => "Skip the assignment-as-claim check (default false)."
+            "description" =>
+              "Skip the prior-claim check (default false). Not needed for an unassigned story — claiming it " <>
+                "assigns it to the workspace user; a story assigned to someone else is refused regardless."
           },
           "assign" => %{
             "type" => "boolean",
             "description" =>
-              "Also take ownership of the tracker issue (default false: the tracker owner is " <>
-                "never changed). The result reports `owner_changed: {changed, old, new}`."
+              "Also take ownership of an already-owned tracker issue (default false). An UNASSIGNED " <>
+                "issue is always assigned to the workspace user on claim (best effort: a failed " <>
+                "write still creates the task and adds `warnings`). The result reports " <>
+                "`owner_changed: {changed, old, new}`."
           },
           "difficulty" => %{
             "type" => "integer",

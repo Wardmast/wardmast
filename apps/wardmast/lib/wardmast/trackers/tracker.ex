@@ -147,6 +147,25 @@ defmodule Wardmast.Trackers.Tracker do
   def status_for_state(:closed), do: :closed
   def status_for_state(_state), do: nil
 
+  @doc """
+  Fold an adapter's `assign_user/2` result into a `signal_claim/3` return:
+  `:ok` stays `:ok`, an error becomes `{:warn, message}`.
+  """
+  @spec assign_outcome(:ok | {:error, term()}) :: :ok | {:warn, String.t()}
+  def assign_outcome(:ok), do: :ok
+
+  def assign_outcome({:error, reason}) do
+    detail =
+      case reason do
+        %{message: m} when is_binary(m) -> m
+        other -> inspect(other)
+      end
+
+    {:warn, "could not assign the story to the workspace user on the tracker: #{detail}"}
+  end
+
+  def assign_outcome(_other), do: :ok
+
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}
   @callback transition(ref, status) :: :ok | {:error, term()}
   @callback update_fields(ref, map()) :: :ok | {:error, term()}
@@ -355,8 +374,13 @@ defmodule Wardmast.Trackers.Tracker do
   - `:workspace_name` / `:workspace_prefix` — the workspace identifiers
   - `:current_user` — the viewer's tracker identity
   - `:host` — the Wardmast host string
+  - `:assign` — when true, also assign the story to `:current_user`
+
+  Returns `:ok`, or `{:warn, message}` when the (best-effort) assignment write
+  failed — the claim still succeeds and the warning is surfaced to the caller.
   """
-  @callback signal_claim(ref, task_id :: String.t(), context :: map()) :: :ok
+  @callback signal_claim(ref, task_id :: String.t(), context :: map()) ::
+              :ok | {:warn, String.t()}
 
   @doc """
   Search upstream tracker items whose title matches `title` (case-insensitive

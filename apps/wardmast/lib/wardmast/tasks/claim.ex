@@ -66,8 +66,7 @@ defmodule Wardmast.Tasks.Claim do
 
   @doc """
   Claim a tracker issue: fetch it via the workspace adapter, refuse unless it
-  is assigned to the workspace's authenticated user (overridable with
-  `force: true`), and create a task linked by `tracker_ref`. Idempotent:
+  is not assigned to someone else, and create a task linked by `tracker_ref`. Idempotent:
   returns the existing task if one already references the issue.
 
   For adapters that implement the optional `check_prior_claim/1` callback
@@ -86,8 +85,11 @@ defmodule Wardmast.Tasks.Claim do
 
   Options:
 
-    * `:force` — when `true`, skip both the assignment check and the prior
-      claim check.
+    * `:force` — when `true`, skip the prior-claim check. An *unassigned* issue
+      needs no force: claiming it assigns it to the workspace user (best
+      effort — a failed tracker write yields a `warnings` entry on the owner
+      map, never a refusal). An issue assigned to SOMEONE ELSE is refused
+      even with `force`.
     * `:difficulty` — explicit 0..5 difficulty, overriding any value derived
       from the issue's labels. `nil`/omitted leaves the derived value (or
       the schema's nil, which routing treats as D2) in place.
@@ -198,8 +200,7 @@ defmodule Wardmast.Tasks.Claim do
 
   Without `yes: true` this is a dry-run preview — nothing is created, and each
   match is reported as `existing` (a task already references it),
-  `would_create` or `would_refuse` (not assigned to the workspace user and no
-  `:force`). With `yes: true` each unclaimed match goes through `claim/3` with
+  `would_create` or `would_refuse` (assigned to someone else). With `yes: true` each unclaimed match goes through `claim/3` with
   the same per-story `:force`, `:difficulty` and `:repo` options and is reported
   as `created`, `existing` or `refused` (with a `reason`). Already-claimed
   stories are never re-claimed, so a repeat run is idempotent.
@@ -244,17 +245,17 @@ defmodule Wardmast.Tasks.Claim do
         Map.merge(base, %{status: "existing", task_id: task.id})
 
       _ when not yes? ->
-        preview_row(base, summary, viewer, Keyword.get(opts, :force, false))
+        preview_row(base, summary, viewer)
 
       _ ->
         claim_row(base, workspace, summary.ref, opts)
     end
   end
 
-  defp preview_row(base, summary, viewer, force?) do
+  defp preview_row(base, summary, viewer) do
     assignees = summary.assignees
 
-    if viewer in assignees or (assignees == [] and force?) do
+    if viewer in assignees or assignees == [] do
       Map.put(base, :status, "would_create")
     else
       Map.merge(base, %{status: "would_refuse", reason: "not assigned to workspace user"})
@@ -262,9 +263,16 @@ defmodule Wardmast.Tasks.Claim do
   end
 
   defp claim_row(base, workspace, ref, opts) do
-    case workspace |> claim(ref, Keyword.take(opts, [:force, :difficulty, :repo])) |> typed() do
-      {:ok, status, task} ->
-        Map.merge(base, %{status: Atom.to_string(status), task_id: task.id})
+    case workspace
+         |> claim_with_owner(ref, Keyword.take(opts, [:force, :difficulty, :repo]))
+         |> typed() do
+      {:ok, status, task, owner} ->
+        row = Map.merge(base, %{status: Atom.to_string(status), task_id: task.id})
+
+        case Map.get(owner, :warnings, []) do
+          [] -> row
+          warnings -> Map.put(row, :warnings, warnings)
+        end
 
       {:error, {_kind, message, _details}} ->
         Map.merge(base, %{status: "refused", reason: message})
@@ -404,8 +412,11 @@ defmodule Wardmast.Tasks.Claim do
   def serialize_claim(status, %Issue{} = task, nil),
     do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
 
-  def serialize_claim(status, %Issue{} = task, owner),
-    do: status |> serialize_claim(task, nil) |> Map.put(:owner_changed, owner)
+  def serialize_claim(status, %Issue{} = task, owner) do
+    {warnings, owner} = Map.pop(owner, :warnings, [])
+    base = status |> serialize_claim(task, nil) |> Map.put(:owner_changed, owner)
+    if warnings == [], do: base, else: Map.put(base, :warnings, warnings)
+  end
 
   @doc """
   The bulk selector in a claim request's string-keyed params: `{:ok,
@@ -504,7 +515,7 @@ defmodule Wardmast.Tasks.Claim do
     with {:ok, current_user_id} <- get_current_user(adapter, workspace),
          {:ok, ref} <- normalize_ref(adapter, ref),
          {:ok, issue_map} <- adapter.fetch(ref),
-         :ok <- check_assignment(adapter, issue_map, current_user_id, force?) do
+         :ok <- check_assignment(adapter, issue_map, current_user_id) do
       old_owners = adapter.assignees(issue_map)
       unchanged = %{changed: false, old: old_owners, new: old_owners}
 
@@ -533,8 +544,15 @@ defmodule Wardmast.Tasks.Claim do
             # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             case create_task(workspace, type, ref, issue_map, adapter, overrides) do
               {:ok, :created, task} ->
-                maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?)
-                owner = owner_change(old_owners, current_user_id, assign?)
+                # An unassigned story is assigned to the workspace user on claim.
+                assign_now? = assign? or old_owners == []
+
+                warnings =
+                  adapter
+                  |> maybe_signal_claim(ref, task, workspace, current_user_id, assign_now?)
+                  |> signal_warnings()
+
+                owner = owner_change(old_owners, current_user_id, assign_now?, warnings)
                 mirror_epic(adapter, workspace, issue_map, task)
                 import_links(adapter, type, workspace, issue_map, task)
                 {:ok, :created, task, owner}
@@ -832,11 +850,10 @@ defmodule Wardmast.Tasks.Claim do
     end
   end
 
-  # bd-6xaaam: `force: true` may bypass the "not yet assigned to viewer" check
-  # (e.g. claiming an unassigned issue), but it must NEVER silently reassign an
-  # issue that is already owned by a different user. Doing so would overwrite a
+  # bd-6xaaam: no flag may silently reassign an issue that is already owned by
+  # a different user. An UNASSIGNED issue is simply claimable (bd-1ixm21). Doing so would overwrite a
   # colleague's assignment — exactly the incident that triggered this fix.
-  defp check_assignment(adapter, issue_map, current_user_id, force) do
+  defp check_assignment(adapter, issue_map, current_user_id) do
     assignees = adapter.assignees(issue_map)
 
     cond do
@@ -844,17 +861,14 @@ defmodule Wardmast.Tasks.Claim do
         # Already assigned to the workspace user — always OK.
         :ok
 
-      Enum.empty?(assignees) and force ->
-        # Unassigned issue: force lets the caller claim without prior assignment.
+      Enum.empty?(assignees) ->
+        # Unassigned: claiming it IS the assignment (the claim then assigns it to
+        # the workspace user, best effort). No `force` needed.
         :ok
 
-      not Enum.empty?(assignees) ->
+      true ->
         # Assigned to SOMEONE ELSE — refuse regardless of force to avoid
         # silently taking over a colleague's ticket.
-        {:error, {:not_assigned, current_user_id}}
-
-      true ->
-        # Unassigned but no force.
         {:error, {:not_assigned, current_user_id}}
     end
   end
@@ -871,12 +885,20 @@ defmodule Wardmast.Tasks.Claim do
 
   # Only an explicit `assign: true` moves the tracker owner (D1); an owner already
   # on the issue is kept, the viewer is added alongside.
-  defp owner_change(old, _viewer, false), do: %{changed: false, old: old, new: old}
+  defp owner_change(old, viewer, assign?, warnings) do
+    base =
+      if assign? and warnings == [] do
+        new = Enum.uniq(old ++ [viewer])
+        %{changed: new != old, old: old, new: new}
+      else
+        %{changed: false, old: old, new: old}
+      end
 
-  defp owner_change(old, viewer, true) do
-    new = Enum.uniq(old ++ [viewer])
-    %{changed: new != old, old: old, new: new}
+    if warnings == [], do: base, else: Map.put(base, :warnings, warnings)
   end
+
+  defp signal_warnings({:warn, message}), do: [message]
+  defp signal_warnings(_), do: []
 
   defp maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?) do
     if function_exported?(adapter, :signal_claim, 3) do

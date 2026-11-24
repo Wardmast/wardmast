@@ -540,8 +540,9 @@ defmodule Wardmast.Trackers.GitHub do
 
     post_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false) and not label_identity?(login), do: assign_user(ref, login)
-    :ok
+    if Map.get(ctx, :assign, false) and not label_identity?(login),
+      do: ref |> assign_user(login) |> Wardmast.Trackers.Tracker.assign_outcome(),
+      else: :ok
   end
 
   # ---- Public helpers ------------------------------------------------------
