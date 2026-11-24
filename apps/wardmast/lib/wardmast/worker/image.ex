@@ -159,6 +159,19 @@ defmodule Wardmast.Worker.Image do
           bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
           openssh-client procps socat sqlite3 tini tmux \\
           chromium=#{@chromium_version} chromium-common=#{@chromium_version} fonts-liberation \\
+     && printf '%s\\n' \\
+          'Types: deb' \\
+          'URIs: http://deb.debian.org/debian' \\
+          'Suites: trixie trixie-updates' \\
+          'Components: main' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          '' \\
+          'Types: deb' \\
+          'URIs: http://deb.debian.org/debian-security' \\
+          'Suites: trixie-security' \\
+          'Components: main' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          > /etc/apt/sources.list.d/debian.sources \\
      && rm -rf /var/lib/apt/lists/*
     # Pinned forge host keys (bd-290vof): `git fetch origin` over ssh verifies strictly.
     #{KnownHosts.containerfile_run()}
