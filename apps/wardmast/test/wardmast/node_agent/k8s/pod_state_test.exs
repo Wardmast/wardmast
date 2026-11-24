@@ -227,6 +227,33 @@ defmodule Wardmast.NodeAgent.K8s.PodStateTest do
                PodState.observe(pod, @opts)
     end
 
+    test "an OOM exit carries the worker container's memory limit from the pod spec (bd-76727c)" do
+      pod =
+        scheduled(%{
+          "phase" => "Failed",
+          "containerStatuses" => [terminated("worker", 137, "OOMKilled")]
+        })
+        |> Map.put("spec", %{
+          "containers" => [
+            %{"name" => "other", "resources" => %{"limits" => %{"memory" => "512Mi"}}},
+            %{"name" => "worker", "resources" => %{"limits" => %{"memory" => "4Gi"}}}
+          ]
+        })
+
+      assert {:exit, %{oom?: true, memory_limit: "4Gi"}} = PodState.observe(pod, @opts)
+    end
+
+    test "an OOM exit with no spec names no limit rather than guessing one" do
+      pod =
+        scheduled(%{
+          "phase" => "Failed",
+          "containerStatuses" => [terminated("worker", 137, "OOMKilled")]
+        })
+
+      assert {:exit, %{oom?: true} = info} = PodState.observe(pod, @opts)
+      assert Map.get(info, :memory_limit) == nil
+    end
+
     test "only the worker container decides: a terminated sidecar is not an exit" do
       pod =
         scheduled(%{
