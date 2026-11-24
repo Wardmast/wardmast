@@ -54,7 +54,13 @@ Unix-only pieces (`flock`, unix sockets, `SIGTERM`) are shared by both.
   loaded the dashboard URL, `arbiter-desktop --quit` (the tray's Quit path) is
   accepted, the app exits and the release's port stops answering. CI runs that
   against a real `mix release` (`build-linux` job); on macOS CI builds the app
-  without bundling.
+  without bundling. Two things a CI runner lacks are supplied by the script, not
+  faked in the app: the release's secrets (throwaway `file:` refs; the shell
+  leaves operator-set `WARDMAST_CLOAK_KEY_REF` / `SECRET_KEY_BASE_REF` alone and
+  skips the keychain when both are set) and a click on the Quit dialog (the real
+  release answers the drain check 401 until the shell has a token, so Quit
+  asks; `SHELL_QUIT_ANSWER=yes|no` pre-answers that dialog, drain check still
+  runs first).
 * **Against a real release** (`mix release wardmast`, prod): `headless` started
   `bin/wardmast start` with `WARDMAST_PORT`, saw `/api/version` answer, and Quit
   stopped it gracefully (SIGTERM reached the BEAM: the start script `exec`s, so

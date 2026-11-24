@@ -27,6 +27,18 @@ pub trait QuitPrompt {
     fn confirm_quit(&self, live: &LiveWork) -> bool;
 }
 
+/// A pre-set answer to the quit dialog (`SHELL_QUIT_ANSWER`), for the CI smoke
+/// test and other unattended runs where nobody can click. `yes`/`no`; anything
+/// else (or unset) means "ask". It only replaces the click: the drain state is
+/// still read first and a `no` still keeps everything running.
+pub fn scripted_answer(value: Option<&str>) -> Option<bool> {
+    match value.map(str::trim) {
+        Some("yes") => Some(true),
+        Some("no") => Some(false),
+        _ => None,
+    }
+}
+
 pub fn query_live_work(port: u16, bearer: Option<&str>) -> LiveWork {
     match http::get(
         port,
@@ -56,6 +68,15 @@ pub fn parse_status(status: u16, body: &str) -> LiveWork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_scripted_quit_answer_is_yes_no_or_ask() {
+        assert_eq!(scripted_answer(Some("yes")), Some(true));
+        assert_eq!(scripted_answer(Some("no")), Some(false));
+        assert_eq!(scripted_answer(Some("")), None);
+        assert_eq!(scripted_answer(Some("maybe")), None);
+        assert_eq!(scripted_answer(None), None);
+    }
 
     #[test]
     fn empty_in_flight_is_idle() {

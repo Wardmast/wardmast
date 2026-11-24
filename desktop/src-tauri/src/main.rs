@@ -17,7 +17,7 @@
 //! changes while a navigation is in flight is never lost.
 
 use arbiter_shell_core::credentials;
-use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
+use arbiter_shell_core::quit::{self, LiveWork, QuitPrompt};
 use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
 use arbiter_shell_core::status_page;
@@ -51,6 +51,12 @@ impl QuitPrompt for DialogPrompt {
             }
             LiveWork::Idle => return true,
         };
+        // Unattended runs (the CI smoke test) answer without a click.
+        if let Some(answer) =
+            quit::scripted_answer(std::env::var("SHELL_QUIT_ANSWER").ok().as_deref())
+        {
+            return answer;
+        }
         self.0
             .dialog()
             .message(msg)

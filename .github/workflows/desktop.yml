@@ -200,8 +200,8 @@ jobs:
           # Private config for the release; nothing here touches a real install.
           HOME: ${{ runner.temp }}/smoke-home
           DATABASE_PATH: ${{ runner.temp }}/smoke-home/arbiter.sqlite3
-          SECRET_KEY_BASE: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          WARDMAST_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          # smoke.sh supplies throwaway secrets as file: refs and answers the
+          # Quit dialog itself (no Secret Service or click on a CI runner).
           RELEASE_DISTRIBUTION: none
           RELEASE_NODE: desktop_smoke
           PHX_SERVER: "true"

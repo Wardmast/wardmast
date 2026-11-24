@@ -8,9 +8,14 @@
 # which is what an installed package does. On Linux without a $DISPLAY the app
 # is wrapped in `xvfb-run`.
 #
-# The release needs its own config in the environment (SECRET_KEY_BASE, a
-# Cloak key, DATABASE_PATH ...); the caller provides it, this script does not
-# guess. Everything the app and release write goes under a private temp dir.
+# The release needs its own config in the environment (DATABASE_PATH,
+# RELEASE_DISTRIBUTION ...); the caller provides it. Its two secrets default to
+# throwaway `file:` refs under the private temp dir (a CI runner has no Secret
+# Service, and the shell leaves operator-set *_REF variables alone, see
+# credentials::prepare_with); export both refs to use your own. Quit's drain
+# check needs a token the smoke does not have, so it would open a dialog nobody
+# can click: SHELL_QUIT_ANSWER defaults to `yes`. Everything the app and release
+# write goes under a private temp dir.
 #
 # Steps, each of which fails the script with a message:
 #   1. the app starts and the release answers GET /api/version;
@@ -53,6 +58,18 @@ if [ -n "$release" ]; then
 else
   unset ARBITER_RELEASE_DIR
 fi
+
+if [ -z "${WARDMAST_CLOAK_KEY_REF:-}" ] || [ -z "${SECRET_KEY_BASE_REF:-}" ]; then
+  python3 - "$work" <<'PY'
+import base64, os, sys
+d = sys.argv[1]
+open(os.path.join(d, "cloak"), "w").write(base64.b64encode(os.urandom(32)).decode())
+open(os.path.join(d, "skb"), "w").write(os.urandom(64).hex())
+PY
+  export WARDMAST_CLOAK_KEY_REF="file:$work/cloak"
+  export SECRET_KEY_BASE_REF="file:$work/skb"
+fi
+export SHELL_QUIT_ANSWER="${SHELL_QUIT_ANSWER:-yes}"
 
 runner=()
 if [ "$(uname -s)" = Linux ] && [ -z "${DISPLAY:-}" ]; then
