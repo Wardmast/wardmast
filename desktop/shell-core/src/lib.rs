@@ -14,3 +14,4 @@ pub mod shell;
 pub mod single_instance;
 pub mod status_page;
 pub mod supervisor;
+pub mod tray_icon;
