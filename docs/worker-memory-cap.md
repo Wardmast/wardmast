@@ -231,14 +231,14 @@ Measured on a 12-core host (anonymous memory above the run's baseline, cgroup
 | same, `ARB_TEST_MAX_CASES=16`, first 5 min | 2.0 GiB |
 
 `$TMPDIR` for the run stayed at 18 MB. So one BEAM is ~2 GiB regardless of
-`max_cases`, and a pod dies when a second one overlaps it (a compile while a test
-run is still going, credo or dialyzer beside a suite) or the agent and a browser
-join. The cause that is **not** a single runaway process is why no per-process
-cap fixes it: the limit is shared, and 4Gi holds one BEAM comfortably, two not.
-The in-pod biggest-process is not cheap to capture (the API exposes no
-`memory.peak` or process list after a kill); the failure message therefore names
-the container's limit, and the first thing to check is the run transcript's last
-two commands.
+`max_cases`; with the agent that is ~2.5 GiB of a 4Gi limit. **Not observed
+directly** (the pods are gone and the kill leaves no peak): the likely trigger is a
+second heavy process overlapping that one (a compile while a test run is still
+going, credo or dialyzer beside a suite, a headless browser), which is why no
+per-process cap fixes it: the limit is shared. The in-pod biggest-process is not
+cheap to capture (the API exposes no `memory.peak` or process list after a kill);
+the failure message therefore names the container's limit, and the first thing to
+check is the run transcript's last two commands.
 
 ### What changed
 
@@ -261,4 +261,4 @@ refused at admission, so raise the two together, LimitRange first:
    `maxLimitRequestRatio`) in the controller config to the same figure and restart
    the controller.
 
-6Gi holds two BEAMs plus the agent; size the quota for `max_concurrent × 6Gi`.
+By the figures above 6Gi holds two BEAMs plus the agent; size the quota for `max_concurrent × 6Gi`.
