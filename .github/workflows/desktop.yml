@@ -75,6 +75,12 @@ jobs:
         working-directory: desktop
         run: cargo test --locked
 
+      # package-macos.sh against fake codesign/xcrun/hdiutil (its signing and
+      # notarisation branching, ordering and labels); needs no macOS.
+      - name: macOS packaging script (offline test)
+        if: runner.os == 'Linux'
+        run: desktop/scripts/test-package-macos.sh
+
   # macOS: compile the Tauri app (no bundle, no release: the release tarball
   # build is its own workflow). Catches a src-tauri that no longer builds
   # against the macOS SDK.

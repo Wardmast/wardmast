@@ -17,6 +17,13 @@
 # can click: SHELL_QUIT_ANSWER defaults to `yes`. Everything the app and release
 # write goes under a private temp dir.
 #
+# On macOS `<arbiter-desktop-binary>` is the .app's Contents/MacOS executable
+# and nothing is wrapped in xvfb. Set SMOKE_EXPECT_DATA_HOME=<dir> to also
+# assert where the release put its data: once it answers, <dir> must hold the
+# shell's `desktop-release.json` pidfile and no stray `~/.wardmast` may exist
+# (the macOS CI job points it at "$HOME/Library/Application Support/Wardmast"
+# with a private HOME and no WARDMAST_DATA_HOME, so it proves the app's own default).
+#
 # Steps, each of which fails the script with a message:
 #   1. the app starts and the release answers GET /api/version;
 #   2. the webview reports it loaded the dashboard URL;
@@ -93,6 +100,15 @@ wait_for() { # <description> <timeout-s> <command...>
 
 wait_for "release to answer $url/api/version" 120 curl -fsS --max-time 2 "$url/api/version"
 echo "ok: release is up on $url"
+
+if [ -n "${SMOKE_EXPECT_DATA_HOME:-}" ]; then
+  [ -f "$SMOKE_EXPECT_DATA_HOME/desktop-release.json" ] \
+    || fail "no desktop-release.json under SMOKE_EXPECT_DATA_HOME=$SMOKE_EXPECT_DATA_HOME"
+  if [ -e "${HOME}/.wardmast" ] && [ "$SMOKE_EXPECT_DATA_HOME" != "${HOME}/.wardmast" ]; then
+    fail "the release also used ${HOME}/.wardmast"
+  fi
+  echo "ok: data home is $SMOKE_EXPECT_DATA_HOME"
+fi
 
 wait_for "webview to load the dashboard" 60 grep -q "page loaded $url/" "$work/app.log"
 echo "ok: window loaded the dashboard"

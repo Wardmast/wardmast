@@ -66,9 +66,11 @@ Unix-only pieces (`flock`, unix sockets, `SIGTERM`) are shared by both.
   stopped it gracefully (SIGTERM reached the BEAM: the start script `exec`s, so
   the pid the shell holds is the VM's, and the port was closed afterwards).
   `bin/wardmast stop` is therefore not needed.
-* **Not exercised:** macOS (CI compiles it, nothing has run it), signing,
-  notarisation, and an interactive click-through of the tray or dialog (the
-  smoke test sends the quit request over the single-instance socket).
+* **Not exercised here:** macOS has no local run: the `.app`/`.dmg` is built
+  and smoke-tested only by the release workflow (see [macOS app](#macos-app)),
+  signing and notarisation only run there with real Apple credentials, and the
+  tray or dialog is never clicked through (the smoke test sends the quit request
+  over the single-instance socket).
 
 ## Lifecycle decisions
 
@@ -222,12 +224,84 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
   (prompt included). The smoke test and a service manager use it instead of
   driving the tray.
 
+## macOS app
+
+PKG 27 (bd-5oa113). The `desktop-macos` job in `.github/workflows/release.yml`
+turns a tagged release into `Arbiter-<version>-macos-arm64[-label].dmg`, attached
+to the same GitHub Release as the tarballs. It needs `build` and `build-macos`
+and nothing needs it, so a failure turns the run red but never holds back the
+other artifacts.
+
+* **Contents.** `Arbiter.app` is the Tauri shell with the `darwin-arm64` release
+  published by `build-macos` under `Contents/Resources/release/` (fetched from
+  the GitHub Release, checksum verified, staged by `scripts/stage-release.sh`).
+  `tauri.macos.conf.json` (merged automatically on macOS) sets the minimum macOS
+  to 13.0, the deployment target the release itself is built for.
+* **Data home.** With no `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` the shell uses
+  `~/Library/Application Support/Wardmast` (`shell-core/src/data_home.rs`;
+  `~/.wardmast` on other platforms), and always hands the result to the release
+  as `WARDMAST_DATA_HOME`, so the database, the cookie and the shell's pidfile
+  and keychain-backup files all live there. The server's own default is still
+  `~/.wardmast` (`Wardmast.Env.data_home/0`): the `arb` CLI in a terminal needs
+  `export WARDMAST_DATA_HOME="$HOME/Library/Application Support/Wardmast"` to talk to
+  the app's data, and `arb doctor` reports a mismatch (data-home split-brain).
+* **Menu bar.** The tray icon is a template image drawn at startup
+  (`shell-core/src/tray_icon.rs`, no asset), so macOS tints it for light/dark.
+  Its menu is *Open dashboard*, *Start at login* (a check item) and *Quit Arbiter*.
+  Quit, and Cmd+Q / the Dock menu, go through `Shell::request_quit`: the drain
+  prompt appears when workers are live.
+* **Login item.** *Start at login* writes
+  `~/Library/LaunchAgents/dev.arbiter.desktop.plist` (`RunAtLoad`, Aqua session
+  only) pointing at the app's executable, and removes it when unticked
+  (`shell-core/src/login_item.rs`; plain file work, no `launchctl`, no
+  dependency). While it is on, every launch rewrites the plist if the app moved,
+  so a drag to another folder or an in-place update keeps working. macOS shows
+  its usual "background item added" notice and lists it under *Login Items*.
+  A login start of a second copy just focuses the first (single instance).
+* **Signing and notarisation** (`scripts/package-macos.sh`), by which secrets
+  exist:
+
+  | Secrets | Result | `.dmg` label |
+  | --- | --- | --- |
+  | none | ad hoc signed so it runs locally; Gatekeeper warns on other Macs | `-unsigned` |
+  | `APPLE_CERTIFICATE` (base64 `.p12`) + `APPLE_CERTIFICATE_PASSWORD` | every Mach-O file in the app, then the app and the `.dmg`, signed with the Developer ID Application identity (hardened runtime, secure timestamp) | `-unnotarised` |
+  | the above + `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID` | the app and the `.dmg` also notarised and stapled | none |
+
+  `APPLE_SIGNING_IDENTITY` is optional (default: the one Developer ID
+  Application identity in the certificate). A half-set configuration fails the
+  job instead of downgrading. Nested files (erts, the NIFs) are signed before the
+  app because signing the app seals them. The hardened runtime would stop the
+  BEAM's JIT, so `src-tauri/Entitlements.plist` grants
+  `allow-jit` and `allow-unsigned-executable-memory` (nothing else) to the app
+  and to every nested binary. The workflow then mounts the `.dmg` and verifies
+  with `codesign --verify --deep --strict`, plus `stapler validate` and
+  `spctl --assess` for a notarised build, and writes the outcome to the run
+  summary and `SIGNING_STATUS`.
+* **Smoke test** (same job, from the `.dmg` itself): `scripts/smoke.sh` runs
+  the installed `.app` with a private `HOME` and no data-home variable, and
+  asserts the release came up with its pidfile under
+  `$HOME/Library/Application Support/Wardmast` (and no `~/.wardmast`), the
+  webview loaded the dashboard, and Quit stopped the release. For a notarised
+  build this also runs the hardened-runtime binaries, which is what catches a
+  missing entitlement.
+* **Offline test.** `scripts/test-package-macos.sh` (run by `desktop.yml` on
+  ubuntu) drives `package-macos.sh` with fake `codesign`/`xcrun`/`hdiutil` and
+  asserts the ordering, flags, labels and failure cases. It does not exercise
+  Apple's tools.
+* **Operator setup.** Enrol in the Apple Developer Program, create a *Developer
+  ID Application* certificate, export it as `.p12`, and add the six secrets above
+  to the repository. Until then every release gets an `-unsigned` `.dmg`.
+* **Known gaps.** The app icon is the 128 px placeholder PNG (Tauri derives the
+  `.icns` from it), the `.dmg` has no background or window layout, there is no
+  `x86_64` app (`build-macos-intel` ships a tarball only), and nothing here has
+  been run on a Mac by a person: the first tagged release is the first real run.
+
 ## What is left for a production shell
 
 1. ~~Build and run the `src-tauri` layer; OS quit through `request_quit`;
-   app-runtime-dir socket.~~ Done (bd-4xp7zx). Still open: macOS has never been
-   run, signing/notarisation, and AppImage/rpm/dmg packaging (only `.deb` is
-   built and smoke-tested).
+   app-runtime-dir socket.~~ Done (bd-4xp7zx). Still open: AppImage/rpm
+   packaging (`.deb` and, from the release workflow, the macOS `.dmg` are built
+   and smoke-tested).
 2. ~~Run against a real release.~~ Done: SIGTERM reaches the BEAM. Still worth
    checking that shutdown fits the 15 s worker grace on a loaded box.
 3. **Credentials (PKG 9):** SECRET_KEY_BASE and the Cloak key are generated on
@@ -245,8 +319,9 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
    lock, adopt-or-refuse, see [Orphaned release](#orphaned-release-shell-crash)).
    Still open: calling the same stop-and-relaunch path from the in-app updater
    (PKG 14), and running it against a real release (item 2).
-7. **Login-item/autostart, notifications, signing/notarisation, tray icons and
-   a real error UI** (retry with details, "copy diagnostics" using the PKG 16
-   support bundle).
+7. ~~macOS login item, signing/notarisation, tray icon, `.app`/`.dmg`~~ Done in
+   code (bd-5oa113, [macOS app](#macos-app)), first real run is the next tagged
+   release. Still open: autostart on Linux, notifications, and a real error UI
+   (retry with details, "copy diagnostics" using the PKG 16 support bundle).
 8. ~~CI~~ Done: `.github/workflows/desktop.yml` (`cargo test` on ubuntu and
    macos, Tauri build on both, Linux smoke test against a real release).
