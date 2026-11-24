@@ -194,3 +194,71 @@ Spawns that are not agent sessions — `git`, `gh`, the doctor's probes, a
 coordinator session's tmux scope (which already has its own
 `systemd-run --user --scope`) — stay in the service cgroup, as before. That is
 what `OOMPolicy=continue` is for.
+
+## Cluster pods (bd-76727c, GitHub #1651)
+
+Everything above is the **local** worker: a systemd scope capped by
+`WARDMAST_WORKER_MEMORY_MAX`. A worker placed on a `cluster` node (k8s) is capped
+by something else: the worker container's `resources.limits.memory`
+(`worker.limits.memory` in the controller config, default `4Gi`), bounded above by
+the namespace's `LimitRange` max (set at `arb node … install` time from the
+`memory` parameter). `WARDMAST_WORKER_MEMORY_MAX` does not apply.
+
+What counts against that one limit: the agent CLI (~0.3–1 GiB), every BEAM the
+agent starts (compile, `mix test`, credo, dialyzer), a headless browser if the task
+starts one, **and** the pod's `/tmp` — a `medium: Memory` `emptyDir`
+(`tmp_size_limit`, 1Gi), whose bytes are charged to the container, not to disk.
+
+### What the 2026-11 kills were (bd-76727c)
+
+All 11 kills between 11-19 and 11-24 ran on the `mesaana` cluster node
+(`worker_runs.node_id`), including `bd-4j0nfe#review`, which was recorded as local.
+They were 3/174 runs (11-19), 4/71 (11-20), 1/110 (11-21), 4/8 (11-24) — arbiter
+had run there since late October with none, so the workload sits at the 4Gi line,
+not past a cliff. The run rows carried no cap and no peak (`MemoryMax=the node's
+memory cap`): the kubelet reports neither after the kill, and the worker did not
+read the limit from the pod spec.
+
+Measured on a 12-core host (anonymous memory above the run's baseline, cgroup
+`memory.stat`, sampled each second; file cache excluded):
+
+| workload | peak anon |
+| --- | --- |
+| cold `mix compile` (test env), 12 schedulers | 1.4 GiB |
+| cold `mix compile`, `+S 64:64` (a many-core node's default) | 1.9 GiB |
+| `mix test` on `apps/wardmast`, `ARB_TEST_MAX_CASES=1`, first 9.5 min | 1.8 GiB |
+| same, `ARB_TEST_MAX_CASES=4`, first 6.5 min | 1.7 GiB |
+| same, `ARB_TEST_MAX_CASES=16`, first 5 min | 2.0 GiB |
+
+`$TMPDIR` for the run stayed at 18 MB. So one BEAM is ~2 GiB regardless of
+`max_cases`, and a pod dies when a second one overlaps it (a compile while a test
+run is still going, credo or dialyzer beside a suite) or the agent and a browser
+join. The cause that is **not** a single runaway process is why no per-process
+cap fixes it: the limit is shared, and 4Gi holds one BEAM comfortably, two not.
+The in-pod biggest-process is not cheap to capture (the API exposes no
+`memory.peak` or process list after a kill); the failure message therefore names
+the container's limit, and the first thing to check is the run transcript's last
+two commands.
+
+### What changed
+
+* The kill is attributed: `PodState` reads the worker container's limit from the
+  pod spec, the exit report carries it (`memory_limit`), and the run's failure
+  reason reads "the worker's container hit its memory limit (4Gi) on its node".
+* Worker test default concurrency (`scripts/test_max_cases.exs`) follows the
+  CPUs the cgroup allows (`logical_processors_available`), not the node's cores,
+  and is capped at 4; a guard in `apps/wardmast_release_env/test/test_max_cases_test.exs`
+  keeps that bound.
+
+### Raising the limit (operator)
+
+The limit is cluster config, and a pod whose limit exceeds the `LimitRange` max is
+refused at admission, so raise the two together, LimitRange first:
+
+1. Re-render the install manifest with a larger `memory` (e.g. `6Gi`) and apply it,
+   so the namespace's `LimitRange` max and `ResourceQuota` grow with it.
+2. Set `worker.limits.memory` (and `requests.memory`, ≤ half the limit under the
+   `maxLimitRequestRatio`) in the controller config to the same figure and restart
+   the controller.
+
+6Gi holds two BEAMs plus the agent; size the quota for `max_concurrent × 6Gi`.
