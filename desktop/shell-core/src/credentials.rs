@@ -229,6 +229,25 @@ pub fn prepare(
     data_dir: &Path,
     random: &dyn Fn(usize) -> std::io::Result<Vec<u8>>,
 ) -> Vec<(String, String)> {
+    prepare_with(store, data_dir, random, &|name| {
+        std::env::var(name).ok().filter(|v| !v.is_empty())
+    })
+}
+
+/// [`prepare`] with an injectable environment lookup. When the operator has
+/// already set **both** `*_REF` variables the shell leaves them alone: it
+/// returns nothing to add (the release inherits them) and never touches the
+/// keychain. That is how a deployment with its own secret manager, and the CI
+/// smoke test on a runner with no Secret Service, opt out of the keychain.
+pub fn prepare_with(
+    store: &dyn SecretStore,
+    data_dir: &Path,
+    random: &dyn Fn(usize) -> std::io::Result<Vec<u8>>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    if env(CLOAK_REF_ENV).is_some() && env(SECRET_KEY_BASE_REF_ENV).is_some() {
+        return Vec::new();
+    }
     if let Err(e) = ensure(store, data_dir, random) {
         eprintln!("arbiter-shell: {e}");
     }

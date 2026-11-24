@@ -12,7 +12,11 @@
 //!    replying `ok`;
 //!  * a launch that cannot take the lock connects to that socket, sends
 //!    `focus`, waits for the reply and reports `Secondary` (the caller exits
-//!    without touching the release).
+//!    without touching the release);
+//!  * `quit` is the one other command: [`request_quit`] asks the running
+//!    instance to run its normal Quit path (drain prompt included). It exists
+//!    so a script (the CI smoke test, a service manager) can quit the app
+//!    without driving its tray.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -52,7 +56,60 @@ impl Drop for Guard {
 /// Conservative `sun_path` limit (macOS: 104 including the NUL).
 const MAX_SOCKET_PATH: usize = 100;
 const FOCUS: &str = "focus";
+const QUIT: &str = "quit";
 const HOW_LONG_TO_WAIT_FOR_PRIMARY: Duration = Duration::from_secs(5);
+const SOCKET_NAME: &str = "shell.sock";
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The single-instance socket path in the app runtime directory:
+///
+///  1. `SHELL_SOCKET` or `ARBITER_SHELL_SOCKET` when explicitly set;
+///  2. `$XDG_RUNTIME_DIR/arbiter/shell.sock` on systemd/freedesktop sessions;
+///  3. `/run/user/<uid>/arbiter/shell.sock` when that per-user runtime dir exists;
+///  4. `<data-home>/run/shell.sock` (`WARDMAST_DATA_HOME`, legacy `ARB_DATA_HOME`,
+///     default `~/.wardmast/run`), matching `Wardmast.MCP.OperatorProof.run_dir/0`
+///     on macOS and non-systemd hosts.
+pub fn default_socket_path() -> PathBuf {
+    let explicit = env_path("SHELL_SOCKET").or_else(|| env_path("ARBITER_SHELL_SOCKET"));
+    let xdg = env_path("XDG_RUNTIME_DIR");
+    let run_user = Some(PathBuf::from(format!("/run/user/{}", unsafe {
+        libc::geteuid()
+    })));
+    let data_home = env_path("WARDMAST_DATA_HOME").or_else(|| env_path("ARB_DATA_HOME"));
+    let home = env_path("HOME");
+    socket_path_from(explicit, xdg, run_user, data_home, home)
+}
+
+pub fn socket_path_from(
+    explicit: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+    run_user_dir: Option<PathBuf>,
+    data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(p) = explicit {
+        return p;
+    }
+    if let Some(xdg) = xdg_runtime_dir {
+        return xdg.join("arbiter").join(SOCKET_NAME);
+    }
+    if let Some(ru) = run_user_dir.filter(|p| p.is_dir()) {
+        return ru.join("arbiter").join(SOCKET_NAME);
+    }
+    if let Some(dh) = data_home {
+        return dh.join("run").join(SOCKET_NAME);
+    }
+    if let Some(h) = home {
+        return h.join(".wardmast").join("run").join(SOCKET_NAME);
+    }
+    std::env::temp_dir().join("arbiter").join(SOCKET_NAME)
+}
 
 fn lock_path(socket: &Path) -> PathBuf {
     let mut s = socket.as_os_str().to_owned();
@@ -64,6 +121,15 @@ fn lock_path(socket: &Path) -> PathBuf {
 pub fn acquire<F>(socket: &Path, on_focus: F) -> io::Result<Acquired>
 where
     F: Fn() + Send + 'static,
+{
+    acquire_with(socket, on_focus, || {})
+}
+
+/// Like [`acquire`], with a handler for the `quit` command too.
+pub fn acquire_with<F, Q>(socket: &Path, on_focus: F, on_quit: Q) -> io::Result<Acquired>
+where
+    F: Fn() + Send + 'static,
+    Q: Fn() + Send + 'static,
 {
     // `sockaddr_un.sun_path` is ~104 bytes on macOS and 108 on Linux; fail with
     // a message instead of an opaque EINVAL from bind.
@@ -93,7 +159,7 @@ where
             let listener = UnixListener::bind(socket)?;
             listener.set_nonblocking(true)?;
             let stop = Arc::new(AtomicBool::new(false));
-            let accept = spawn_accept_loop(listener, Arc::clone(&stop), on_focus);
+            let accept = spawn_accept_loop(listener, Arc::clone(&stop), on_focus, on_quit);
             Ok(Acquired::Primary(Guard {
                 socket: socket.to_path_buf(),
                 stop,
@@ -109,13 +175,15 @@ where
     }
 }
 
-fn spawn_accept_loop<F>(
+fn spawn_accept_loop<F, Q>(
     listener: UnixListener,
     stop: Arc<AtomicBool>,
     on_focus: F,
+    on_quit: Q,
 ) -> JoinHandle<()>
 where
     F: Fn() + Send + 'static,
+    Q: Fn() + Send + 'static,
 {
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
@@ -125,8 +193,12 @@ where
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let mut line = String::new();
                     let mut reader = BufReader::new(&stream);
-                    if reader.read_line(&mut line).is_ok() && line.trim() == FOCUS {
-                        on_focus();
+                    if reader.read_line(&mut line).is_ok() {
+                        match line.trim() {
+                            FOCUS => on_focus(),
+                            QUIT => on_quit(),
+                            _ => continue,
+                        }
                         let _ = (&stream).write_all(b"ok\n");
                     }
                 }
@@ -142,9 +214,19 @@ where
 /// The primary holds the lock before it binds, so for a moment the socket may
 /// not exist yet; retry until it does.
 fn request_focus(socket: &Path) -> io::Result<()> {
+    send_command(socket, FOCUS)
+}
+
+/// Ask the running instance to run its Quit path. The reply only says the
+/// request was received: the instance may still be showing the drain prompt.
+pub fn request_quit(socket: &Path) -> io::Result<()> {
+    send_command(socket, QUIT)
+}
+
+fn send_command(socket: &Path, command: &str) -> io::Result<()> {
     let deadline = Instant::now() + HOW_LONG_TO_WAIT_FOR_PRIMARY;
     loop {
-        match try_focus_once(socket) {
+        match try_command_once(socket, command) {
             Ok(()) => return Ok(()),
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => thread::sleep(Duration::from_millis(50)),
@@ -152,10 +234,10 @@ fn request_focus(socket: &Path) -> io::Result<()> {
     }
 }
 
-fn try_focus_once(socket: &Path) -> io::Result<()> {
+fn try_command_once(socket: &Path, command: &str) -> io::Result<()> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.write_all(format!("{FOCUS}\n").as_bytes())?;
+    stream.write_all(format!("{command}\n").as_bytes())?;
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply)?;
     if reply.trim() == "ok" {
@@ -163,7 +245,7 @@ fn try_focus_once(socket: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "primary did not acknowledge focus",
+            "primary did not acknowledge the command",
         ))
     }
 }
@@ -251,5 +333,92 @@ mod tests {
             .map(|h| h.join().unwrap())
             .collect();
         assert_eq!(results.iter().filter(|r| r.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn default_socket_path_honours_explicit_override_first() {
+        assert_eq!(
+            socket_path_from(
+                Some(PathBuf::from("/custom/shell.sock")),
+                Some(PathBuf::from("/run/user/1000")),
+                Some(PathBuf::from("/run/user/1000")),
+                Some(PathBuf::from("/custom/data")),
+                Some(PathBuf::from("/home/u")),
+            ),
+            PathBuf::from("/custom/shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_uses_xdg_runtime_dir_app_subdir() {
+        assert_eq!(
+            socket_path_from(
+                None,
+                Some(PathBuf::from("/run/user/1000")),
+                None,
+                Some(PathBuf::from("/home/u/.wardmast")),
+                Some(PathBuf::from("/home/u")),
+            ),
+            PathBuf::from("/run/user/1000/arbiter/shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_uses_run_user_uid_when_xdg_runtime_dir_is_unset() {
+        let run_user = std::env::temp_dir().join(format!("si-ru-{}", std::process::id()));
+        fs::create_dir_all(&run_user).unwrap();
+        assert_eq!(
+            socket_path_from(
+                None,
+                None,
+                Some(run_user.clone()),
+                None,
+                Some(PathBuf::from("/home/u")),
+            ),
+            run_user.join("arbiter").join("shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_data_home_run_dir_when_no_runtime_dir_exists() {
+        let missing = PathBuf::from("/nonexistent-run-user-dir-for-test");
+        assert_eq!(
+            socket_path_from(
+                None,
+                None,
+                Some(missing.clone()),
+                Some(PathBuf::from("/Users/u/.wardmast")),
+                Some(PathBuf::from("/Users/u")),
+            ),
+            PathBuf::from("/Users/u/.wardmast/run/shell.sock")
+        );
+        assert_eq!(
+            socket_path_from(
+                None,
+                None,
+                Some(missing),
+                None,
+                Some(PathBuf::from("/Users/u"))
+            ),
+            PathBuf::from("/Users/u/.wardmast/run/shell.sock")
+        );
+    }
+
+    #[test]
+    fn a_quit_command_reaches_the_primary_and_does_not_focus_it() {
+        let path = sock("quitcmd").join("s");
+        let (focus_tx, focus_rx) = mpsc::channel();
+        let (quit_tx, quit_rx) = mpsc::channel();
+        let Acquired::Primary(_guard) = acquire_with(
+            &path,
+            move || focus_tx.send(()).unwrap(),
+            move || quit_tx.send(()).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected to be primary");
+        };
+        request_quit(&path).unwrap();
+        quit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(focus_rx.try_recv().is_err());
     }
 }
