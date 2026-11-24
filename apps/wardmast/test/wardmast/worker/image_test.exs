@@ -182,6 +182,28 @@ defmodule Wardmast.Worker.ImageTest do
       assert base =~ ~r/LABEL arbiter\.chromium-version="\d+\./
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
     end
+
+    test "restores live Debian apt sources after the pinned install so derived images can apt-get update" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
+      base = plan.base.containerfile
+
+      {before_install, after_install} =
+        base |> String.split("chromium=", parts: 2) |> then(fn [a, b] -> {a, b} end)
+
+      assert before_install =~ "snapshot.debian.org"
+      refute after_install =~ "snapshot.debian.org/archive"
+
+      assert after_install =~ "URIs: http://deb.debian.org/debian\n" or
+               after_install =~ "'URIs: http://deb.debian.org/debian'"
+
+      assert after_install =~ "'Suites: trixie trixie-updates'"
+      assert after_install =~ "URIs: http://deb.debian.org/debian-security'"
+      assert after_install =~ "'Suites: trixie-security'"
+      assert after_install =~ "> /etc/apt/sources.list.d/debian.sources"
+      # No frozen-snapshot escape hatch leaks into derived images.
+      refute base =~ "apt.conf.d"
+    end
   end
 
   # bd-59m96o: an arb compiled on OTP 29 cannot load on a repo image's OTP 27

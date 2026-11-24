@@ -2,7 +2,7 @@ mod common;
 
 use arbiter_shell_core::http;
 use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
-use arbiter_shell_core::shell::{CloseAction, QuitOutcome, Shell};
+use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::supervisor::{State, StopOutcome};
 use common::{Fake, WAIT};
 use std::sync::Mutex;
@@ -171,4 +171,85 @@ fn quit_while_the_release_is_not_running_just_stops_without_asking() {
     assert!(matches!(shell.request_quit(&prompt), QuitOutcome::Quit(_)));
     assert!(prompt.seen.lock().unwrap().is_empty());
     assert_eq!(shell.supervisor().state(), State::Stopped);
+}
+
+#[test]
+fn os_exit_request_without_prior_request_quit_prevents_exit_and_runs_request_quit() {
+    let fake = Fake::new("os-exit-decline", &[("FAKE_IN_FLIGHT", "2")]);
+    let (shell, port) = started(&fake);
+
+    // An OS-level quit (Cmd+Q, RunEvent::ExitRequested) arrives before
+    // request_quit has approved an exit: it must prevent the event loop from
+    // tearing down synchronously and route through request_quit instead.
+    assert_eq!(shell.on_exit_requested(), ExitAction::PreventAndRequestQuit);
+    assert_eq!(shell.supervisor().state(), State::Running { port });
+    assert!(!fake.log_lines().contains(&"term".to_string()));
+
+    // The triggered request_quit prompts because workers are live; declining
+    // leaves the release running and later exit requests are still intercepted.
+    let decline = Prompt::new(false);
+    assert_eq!(shell.request_quit(&decline), QuitOutcome::Cancelled);
+    assert_eq!(*decline.seen.lock().unwrap(), vec![LiveWork::Busy(2)]);
+    assert_eq!(shell.on_exit_requested(), ExitAction::PreventAndRequestQuit);
+    assert!(!fake.log_lines().contains(&"term".to_string()));
+
+    // Once request_quit confirms and stops the release, the follow-up
+    // ExitRequested (from app.exit(0)) is allowed to exit.
+    let confirm = Prompt::new(true);
+    assert_eq!(
+        shell.request_quit(&confirm),
+        QuitOutcome::Quit(StopOutcome::Graceful)
+    );
+    assert_eq!(*confirm.seen.lock().unwrap(), vec![LiveWork::Busy(2)]);
+    assert_eq!(shell.on_exit_requested(), ExitAction::AllowExit);
+    assert!(fake.log_lines().contains(&"exit clean".to_string()));
+}
+
+#[test]
+fn overlapping_quit_requests_do_not_show_a_second_prompt() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    struct BlockingPrompt {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        calls: Mutex<usize>,
+    }
+
+    impl QuitPrompt for BlockingPrompt {
+        fn confirm_quit(&self, _live: &LiveWork) -> bool {
+            *self.calls.lock().unwrap() += 1;
+            self.entered.wait();
+            self.release.wait();
+            false
+        }
+    }
+
+    let fake = Fake::new("quit-single-flight", &[("FAKE_IN_FLIGHT", "1")]);
+    let (shell, port) = started(&fake);
+    let shell = Arc::new(shell);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let prompt = Arc::new(BlockingPrompt {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        calls: Mutex::new(0),
+    });
+
+    let s1 = Arc::clone(&shell);
+    let p1 = Arc::clone(&prompt);
+    let first = thread::spawn(move || s1.request_quit(&*p1));
+
+    // Wait until the first request_quit is showing the prompt.
+    entered.wait();
+
+    // A second quit request (e.g. repeated Cmd+Q or tray Quit while the dialog
+    // is open) returns Cancelled immediately without invoking the prompt again.
+    assert_eq!(shell.request_quit(&*prompt), QuitOutcome::Cancelled);
+    assert_eq!(*prompt.calls.lock().unwrap(), 1);
+
+    release.wait();
+    assert_eq!(first.join().unwrap(), QuitOutcome::Cancelled);
+    assert_eq!(shell.supervisor().state(), State::Running { port });
+    shell.request_quit(&Prompt::new(true));
 }

@@ -17,8 +17,8 @@
 //! changes while a navigation is in flight is never lost.
 
 use arbiter_shell_core::credentials;
-use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
-use arbiter_shell_core::shell::{CloseAction, QuitOutcome, Shell};
+use arbiter_shell_core::quit::{self, LiveWork, QuitPrompt};
+use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
 use arbiter_shell_core::status_page;
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec, State};
@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, Url, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, Url, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 /// Where the bundled status page lives; captured once the window exists.
@@ -51,6 +51,12 @@ impl QuitPrompt for DialogPrompt {
             }
             LiveWork::Idle => return true,
         };
+        // Unattended runs (the CI smoke test) answer without a click.
+        if let Some(answer) =
+            quit::scripted_answer(std::env::var("SHELL_QUIT_ANSWER").ok().as_deref())
+        {
+            return answer;
+        }
         self.0
             .dialog()
             .message(msg)
@@ -105,21 +111,77 @@ fn sync_window(app: &AppHandle, shell: &Shell) {
     }
 }
 
-fn main() {
-    let socket = std::env::temp_dir().join("arbiter-shell.sock"); // production: the app runtime dir
-    let handle_slot: Arc<Mutex<Option<AppHandle>>> = Arc::default();
-    let slot = Arc::clone(&handle_slot);
-    let _guard = match single_instance::acquire(&socket, move || {
-        if let Some(app) = slot.lock().unwrap().as_ref() {
-            show_main(app);
+/// Every way of quitting (tray "Quit", the single-instance `quit` command, an
+/// OS-level exit request) ends up here, so none can skip the drain prompt.
+/// The dialog blocks, so it runs off the event-loop thread; on confirmation the
+/// release is already stopped and `app.exit` re-enters `RunEvent::ExitRequested`,
+/// which `Shell::on_exit_requested` now lets through.
+fn begin_quit(app: &AppHandle, shell: &Arc<Shell>) {
+    let (app, shell) = (app.clone(), Arc::clone(shell));
+    std::thread::spawn(move || {
+        if let QuitOutcome::Quit(_) = shell.request_quit(&DialogPrompt(app.clone())) {
+            app.exit(0);
         }
-    }) {
+    });
+}
+
+/// `--quit`: ask the running instance to quit (its normal path, prompt and all)
+/// instead of starting a second one. Used by the CI smoke test.
+fn quit_requested_by_argv() -> bool {
+    std::env::args().skip(1).any(|a| a == "--quit")
+}
+
+/// Where the bundled release lives: `ARBITER_RELEASE_DIR` (development and
+/// the smoke test) or the app's `release/` resource directory.
+fn release_dir(context: &tauri::Context) -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("ARBITER_RELEASE_DIR").filter(|v| !v.is_empty()) {
+        return dir.into();
+    }
+    tauri::utils::platform::resource_dir(context.package_info(), &tauri::Env::default())
+        .expect("app resource dir")
+        .join("release")
+}
+
+fn main() {
+    let socket = single_instance::default_socket_path();
+    if quit_requested_by_argv() {
+        match single_instance::request_quit(&socket) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("no running instance to quit ({}): {e}", socket.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    let handle_slot: Arc<Mutex<Option<AppHandle>>> = Arc::default();
+    let shell_slot: Arc<Mutex<Option<Arc<Shell>>>> = Arc::default();
+    let (focus_slot, quit_slot, quit_shell_slot) = (
+        Arc::clone(&handle_slot),
+        Arc::clone(&handle_slot),
+        Arc::clone(&shell_slot),
+    );
+    let _guard = match single_instance::acquire_with(
+        &socket,
+        move || {
+            if let Some(app) = focus_slot.lock().unwrap().as_ref() {
+                show_main(app);
+            }
+        },
+        move || {
+            let app = quit_slot.lock().unwrap().clone();
+            let shell = quit_shell_slot.lock().unwrap().clone();
+            if let (Some(app), Some(shell)) = (app, shell) {
+                begin_quit(&app, &shell);
+            }
+        },
+    ) {
         Ok(Acquired::Primary(g)) => g,
         Ok(Acquired::Secondary) => return, // the running instance was asked to focus
         Err(e) => panic!("single-instance: {e}"),
     };
 
-    let release_dir = std::env::var("ARBITER_RELEASE_DIR").expect("bundled release dir");
+    let context = tauri::generate_context!();
+    let release_dir = release_dir(&context);
     // PKG 9: first run generates the Cloak key and SECRET_KEY_BASE into the OS
     // keychain; the release gets refs (`keychain:<service>#<account>`), never
     // values. A locked/missing item is not regenerated: the release fails its
@@ -131,12 +193,20 @@ fn main() {
         &credentials::os_random,
     ));
     let mut config = Config::new(release);
+    // Pin the port the shell tries first (the smoke test picks a free one).
+    if let Some(port) = std::env::var("SHELL_PREFERRED_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        config.preferred_port = port;
+    }
     // Adopt-or-refuse an orphaned release instead of starting a second server
     // on the same database (docs/desktop-shell.md, "Orphaned release").
     config.data_home = arbiter_shell_core::release_lock::resolve_data_home();
     config.expected_version =
-        arbiter_shell_core::release_lock::bundled_version(std::path::Path::new(&release_dir));
+        arbiter_shell_core::release_lock::bundled_version(&release_dir);
     let shell = Arc::new(Shell::start(config, None));
+    *shell_slot.lock().unwrap() = Some(Arc::clone(&shell));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -147,6 +217,9 @@ fn main() {
             let shell = Arc::clone(&shell);
             move |webview, payload| {
                 if payload.event() == PageLoadEvent::Finished {
+                    // A stable, greppable line: the CI smoke test waits for the
+                    // dashboard URL here to know the webview really loaded it.
+                    eprintln!("arbiter-desktop: page loaded {}", payload.url());
                     sync_window(webview.app_handle(), &shell);
                 }
             }
@@ -169,17 +242,7 @@ fn main() {
                 }
                 tray.on_menu_event(move |app, ev| match ev.id().as_ref() {
                     "open" => show_main(app),
-                    "quit" => {
-                        // The dialog blocks; keep it off the menu/event thread.
-                        let (app, shell) = (app.clone(), Arc::clone(&tray_shell));
-                        std::thread::spawn(move || {
-                            if let QuitOutcome::Quit(_) =
-                                shell.request_quit(&DialogPrompt(app.clone()))
-                            {
-                                app.exit(0);
-                            }
-                        });
-                    }
+                    "quit" => begin_quit(app, &tray_shell),
                     _ => {}
                 })
                 .build(app)?;
@@ -207,6 +270,21 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Arbiter desktop shell");
+        .build(context)
+        .expect("error while building the Arbiter desktop shell")
+        .run({
+            let shell = Arc::clone(&shell);
+            move |app, event| {
+                // OS-level quit (Cmd+Q, the dock menu, logout, last window
+                // closed): never let the event loop tear down on its own, that
+                // would skip the drain prompt and leave the release running
+                // detached. Route it through `request_quit` instead.
+                if let RunEvent::ExitRequested { api, .. } = event {
+                    if let ExitAction::PreventAndRequestQuit = shell.on_exit_requested() {
+                        api.prevent_exit();
+                        begin_quit(app, &shell);
+                    }
+                }
+            }
+        });
 }

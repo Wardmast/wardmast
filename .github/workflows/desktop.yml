@@ -1,20 +1,21 @@
-# Desktop shell lifecycle core (bd-d6jdq8, PKG 26): runs `cargo test` for
-# `desktop/shell-core`, the crate that supervises the bundled release and keeps
-# a second server off the data home (pidfile + launch lock). Its tests are the
-# acceptance tests for adopt / stale / version-mismatch / two-shells-at-once.
+# Desktop shell (docs/desktop-shell.md): shell-core tests on Linux and macOS,
+# the Tauri app built on both, and a scripted smoke test on Linux that runs the
+# bundled app against a real `mix release`.
 #
-# PATH-FILTERED. Wardmast's merger treats every check run on the PR head as part
-# of the pipeline (see the NOTE in ci.yml), so this job is only started for PRs
-# that touch the desktop shell or this file; any other PR gets no check run from
-# it. Because it can gate a merge it must stay deterministic: no `|| true`, no
-# warning-only steps.
-#
-# `src-tauri` is not built here: it needs webkit2gtk / Xcode and is not a
-# workspace member (see desktop/Cargo.toml). `shell-core` has no GUI deps.
-name: Desktop shell
+# PATH FILTER. Wardmast's merger reads every check run's conclusion on the PR
+# head SHA and treats any non-success as a failed pipeline (see the NOTE in
+# ci.yml). Filtering on `pull_request` paths means the jobs below only exist
+# on PRs that touch the shell (or this file); an unrelated PR never sees them.
+# They also run on every push to main so a regression is caught after merge.
+name: Desktop
 
 on:
   pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  push:
+    branches: [main]
     paths:
       - "desktop/**"
       - ".github/workflows/desktop.yml"
@@ -25,38 +26,192 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Same pin the release workflow uses for its Rust builds.
+  RUST_VERSION: "1.91.0"
+  OTP_VERSION: "29.1.1"
+  ELIXIR_VERSION: "1.20.4"
+  # System packages the Tauri webview needs on Linux.
+  TAURI_LINUX_DEPS: >-
+    build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev
+    libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+    xvfb xauth
 
 jobs:
-  shell-core:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: desktop
+  # `cargo test` in desktop/: shell-core's unit tests plus the scripted
+  # `headless` smoke tests (supervisor, drain-prompt quit, OS-level quit,
+  # single-instance socket). No webview needed.
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
 
-      # rustup ships on the runner image; select stable with rustfmt.
-      - name: Install Rust (stable)
+      - name: Install Rust ${{ env.RUST_VERSION }}
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
-          rustup default stable
-          cargo --version
-          rustc --version
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --component rustfmt
+          rustup default "${RUST_VERSION}"
 
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             desktop/target
-          key: desktop-${{ runner.os }}-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: desktop-${{ runner.os }}-
+          key: desktop-test-${{ matrix.os }}-${{ hashFiles('desktop/Cargo.lock') }}
 
-      - name: Format
+      - name: cargo fmt --check
+        working-directory: desktop
         run: cargo fmt --check
 
-      - name: Test
-        run: cargo test -p arbiter-shell-core
+      - name: cargo test
+        working-directory: desktop
+        run: cargo test --locked
+
+  # macOS: compile the Tauri app (no bundle, no release: the release tarball
+  # build is its own workflow). Catches a src-tauri that no longer builds
+  # against the macOS SDK.
+  build-macos:
+    name: build Tauri app (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: desktop-tauri-macos-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      - name: Build the app
+        working-directory: desktop/src-tauri
+        run: npx --yes @tauri-apps/cli@2 build --no-bundle --ci
+
+  # A real `mix release`, built the way release.yml builds it (prod compile,
+  # digested assets), handed to the Linux job below.
+  release:
+    name: mix release (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MIX_ENV: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      # `mix release` vendors playwright-core with `npm ci` (node >= 22).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build/prod
+          key: desktop-release-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get --only prod
+      - run: mix cmd --app wardmast_web mix assets.setup
+      - run: mix compile
+      - run: mix cmd --app wardmast_web mix assets.deploy
+      - run: mix release wardmast
+
+      # A tarball, because upload-artifact drops file modes (bin/wardmast, erts).
+      - name: Pack the release
+        run: tar -czf "${RUNNER_TEMP}/wardmast-release.tar.gz" -C _build/prod/rel/wardmast .
+
+      - name: Upload the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: wardmast-release
+          path: ${{ runner.temp }}/wardmast-release.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  # Build the Linux package with the release inside it, install it into a
+  # scratch root, and drive the installed app: start, open the dashboard, Quit,
+  # confirm the release stopped. See desktop/scripts/smoke.sh.
+  build-linux:
+    name: build + smoke Tauri app (ubuntu)
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the webview toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${TAURI_LINUX_DEPS}
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: desktop-tauri-linux-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wardmast-release
+          path: ${{ runner.temp }}/release
+
+      - name: Stage the release for bundling
+        run: desktop/scripts/stage-release.sh "${RUNNER_TEMP}/release/wardmast-release.tar.gz"
+
+      - name: Build the app and its .deb
+        working-directory: desktop/src-tauri
+        run: npx --yes @tauri-apps/cli@2 build --ci --config tauri.release.conf.json --bundles deb
+
+      - name: Install the .deb into a scratch root
+        run: |
+          dpkg -x desktop/src-tauri/target/release/bundle/deb/*.deb "${RUNNER_TEMP}/pkg"
+          test -x "${RUNNER_TEMP}/pkg/usr/bin/arbiter-desktop"
+          test -x "${RUNNER_TEMP}/pkg/usr/lib/Arbiter/release/bin/wardmast"
+
+      - name: Smoke test (start, dashboard, Quit stops the release)
+        env:
+          # Private config for the release; nothing here touches a real install.
+          HOME: ${{ runner.temp }}/smoke-home
+          DATABASE_PATH: ${{ runner.temp }}/smoke-home/arbiter.sqlite3
+          # smoke.sh supplies throwaway secrets as file: refs and answers the
+          # Quit dialog itself (no Secret Service or click on a CI runner).
+          RELEASE_DISTRIBUTION: none
+          RELEASE_NODE: desktop_smoke
+          PHX_SERVER: "true"
+        run: |
+          mkdir -p "${HOME}"
+          desktop/scripts/smoke.sh "${RUNNER_TEMP}/pkg/usr/bin/arbiter-desktop"
+
+      - name: Upload the .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: arbiter-desktop-deb
+          path: desktop/src-tauri/target/release/bundle/deb/*.deb
+          retention-days: 7

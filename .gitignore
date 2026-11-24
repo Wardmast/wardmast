@@ -88,3 +88,5 @@ accounts.json
 /desktop/target/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+# A real release staged for bundling (desktop/scripts/stage-release.sh).
+/desktop/src-tauri/release-bundle/
