@@ -119,13 +119,11 @@ pub fn ref_env() -> Vec<(String, String)> {
     ]
 }
 
-/// Where the shell keeps its non-secret state: `WARDMAST_DATA_HOME`, else
-/// `~/.wardmast` (what the server and `arb server doctor` use too).
+/// Where the shell keeps its non-secret state: the release's data home
+/// (`WARDMAST_DATA_HOME`, else `~/Library/Application Support/Wardmast` on
+/// macOS and `~/.wardmast` elsewhere, see [`crate::data_home`]).
 pub fn default_data_dir() -> PathBuf {
-    match std::env::var("WARDMAST_DATA_HOME") {
-        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".wardmast"),
-    }
+    crate::data_home::resolve().unwrap_or_else(|| PathBuf::from(".wardmast"))
 }
 
 /// Make sure both items exist, generating only what is positively missing and

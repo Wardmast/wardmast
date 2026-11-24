@@ -231,15 +231,12 @@ pub fn parse_version(body: &str) -> Option<String> {
 }
 
 /// The data home the release will use, resolved like `Wardmast.Env.data_home/0`
-/// and `rel/env.sh.eex`: `WARDMAST_DATA_HOME`, else `ARB_DATA_HOME`, else
-/// `$HOME/.wardmast` (empty values count as unset). The shell passes the
-/// result to the release as `WARDMAST_DATA_HOME` so both always agree.
+/// and `rel/env.sh.eex` (see [`crate::data_home`]; the last resort is
+/// `~/Library/Application Support/Wardmast` on macOS, `~/.wardmast` elsewhere).
+/// The shell passes the result to the release as `WARDMAST_DATA_HOME` so both
+/// always agree.
 pub fn resolve_data_home() -> Option<PathBuf> {
-    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    var("WARDMAST_DATA_HOME")
-        .or_else(|| var("ARB_DATA_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".wardmast")))
+    crate::data_home::resolve()
 }
 
 /// The app version of a bundled `mix release` directory, from

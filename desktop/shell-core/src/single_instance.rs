@@ -73,7 +73,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 ///  2. `$XDG_RUNTIME_DIR/arbiter/shell.sock` on systemd/freedesktop sessions;
 ///  3. `/run/user/<uid>/arbiter/shell.sock` when that per-user runtime dir exists;
 ///  4. `<data-home>/run/shell.sock` (`WARDMAST_DATA_HOME`, legacy `ARB_DATA_HOME`,
-///     default `~/.wardmast/run`), matching `Wardmast.MCP.OperatorProof.run_dir/0`
+///     default `~/.wardmast/run`, `~/Library/Application Support/Wardmast/run` on macOS), matching `Wardmast.MCP.OperatorProof.run_dir/0`
 ///     on macOS and non-systemd hosts.
 pub fn default_socket_path() -> PathBuf {
     let explicit = env_path("SHELL_SOCKET").or_else(|| env_path("ARBITER_SHELL_SOCKET"));
@@ -106,7 +106,9 @@ pub fn socket_path_from(
         return dh.join("run").join(SOCKET_NAME);
     }
     if let Some(h) = home {
-        return h.join(".wardmast").join("run").join(SOCKET_NAME);
+        return crate::data_home::default_for(std::env::consts::OS, &h)
+            .join("run")
+            .join(SOCKET_NAME);
     }
     std::env::temp_dir().join("arbiter").join(SOCKET_NAME)
 }

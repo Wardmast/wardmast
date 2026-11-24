@@ -4,7 +4,9 @@
 
 pub mod backoff;
 pub mod credentials;
+pub mod data_home;
 pub mod http;
+pub mod login_item;
 pub mod port;
 pub mod quit;
 pub mod release_lock;
