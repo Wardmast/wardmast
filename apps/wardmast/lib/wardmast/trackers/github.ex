@@ -540,9 +540,16 @@ defmodule Wardmast.Trackers.GitHub do
 
     post_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false) and not label_identity?(login),
-      do: ref |> assign_user(login) |> Wardmast.Trackers.Tracker.assign_outcome(),
-      else: :ok
+    cond do
+      not Map.get(ctx, :assign, false) ->
+        :ok
+
+      label_identity?(login) ->
+        {:warn, "GitHub App mode claims by label; the issue was not assigned on the tracker"}
+
+      true ->
+        ref |> assign_user(login) |> Wardmast.Trackers.Tracker.assign_outcome()
+    end
   end
 
   # ---- Public helpers ------------------------------------------------------

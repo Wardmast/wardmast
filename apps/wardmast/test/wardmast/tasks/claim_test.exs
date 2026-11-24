@@ -236,6 +236,24 @@ defmodule Wardmast.Tasks.ClaimTest do
       assert %{warnings: [^warning]} = Claim.serialize_claim(:created, task, owner)
     end
 
+    test "label identity (GitHub App mode) warns instead of claiming an assignment", %{
+      github_ws: ws
+    } do
+      stub_gh(fn conn -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{}) end)
+
+      ctx = %{
+        workspace_name: "w",
+        workspace_prefix: "bd",
+        current_user: "label:arbiter",
+        host: "h",
+        assign: true
+      }
+
+      _ = ws
+      assert {:warn, msg} = Wardmast.Trackers.GitHub.signal_claim("43", "bd-1", ctx)
+      assert msg =~ "label"
+    end
+
     test "force: true bypasses the assignment check", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do

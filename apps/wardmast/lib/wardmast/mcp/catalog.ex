@@ -2433,9 +2433,9 @@ defmodule Wardmast.MCP.Catalog do
           "assign" => %{
             "type" => "boolean",
             "description" =>
-              "Also take ownership of an already-owned tracker issue (default false). An UNASSIGNED " <>
-                "issue is always assigned to the workspace user on claim (best effort: a failed " <>
-                "write still creates the task and adds `warnings`). The result reports " <>
+              "Also assign the tracker issue to the workspace user (largely redundant: an UNASSIGNED " <>
+                "issue is always assigned on claim; one owned by someone else is refused). Best effort: a failed " <>
+                "write still creates the task and adds `warnings`. The result reports " <>
                 "`owner_changed: {changed, old, new}`."
           },
           "difficulty" => %{

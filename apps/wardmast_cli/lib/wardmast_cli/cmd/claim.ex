@@ -22,10 +22,10 @@ defmodule WardmastCli.Cmd.Claim do
   references that issue.
 
   Flags:
-    --assign       Also take ownership of the tracker issue even when it
-                   already has other owners. Unassigned stories are assigned
-                   to you on claim regardless; the result reports
-                   owner_changed (and any warnings).
+    --assign       Also assign the tracker issue to you. Largely redundant:
+                   unassigned stories are assigned to you on claim anyway,
+                   and a story owned by someone else is refused. The result
+                   reports owner_changed (and any warnings).
     --force        Skip the prior-claim check (another installation's claim
                    comment). NOT needed for an unassigned story; it does not
                    override a story assigned to someone else.
@@ -170,6 +170,8 @@ defmodule WardmastCli.Cmd.Claim do
     IO.puts(
       "  #{String.pad_trailing(row["ref"] || "", 10)} #{String.pad_trailing(row["status"] || "", 13)} #{row["title"]}#{suffix}"
     )
+
+    for w <- row["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{row["ref"]}: #{w}")
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -192,6 +194,8 @@ defmodule WardmastCli.Cmd.Claim do
     IO.puts("  title:        #{task["title"]}")
     IO.puts("  state:        #{task["state"]}")
     IO.puts("  tracker:      #{task["tracker_type"]}:#{task["tracker_ref"]}")
+
+    for w <- payload["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{w}")
 
     if repo do
       IO.puts("")
