@@ -25,7 +25,9 @@ defmodule WardmastWeb.Api.WorkspaceController do
   alias Wardmast.Params
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Tasks.Workspace.ConfigSchema
+  alias Wardmast.Tasks.Workspace.DeprecatedConfigPaths
   alias Wardmast.Tasks.Workspace.Operations
+  alias WardmastWeb.Api.WorkspaceJSON
   alias WardmastWeb.Api.WorkspaceParam
 
   action_fallback WardmastWeb.Api.FallbackController
@@ -132,7 +134,24 @@ defmodule WardmastWeb.Api.WorkspaceController do
          {:ok, ws} <- WorkspaceParam.resolve_ref(conn, id),
          {:ok, updated} <-
            Ash.update(ws, args, action: :patch_config, context: guardrail_context(conn)) do
-      render(conn, :show, workspace: updated)
+      # bd-4j0nfe: a root `sandbox.*` was written to its canonical path; say so.
+      case Ash.Resource.get_metadata(updated, :config_deprecations) || [] do
+        [] ->
+          render(conn, :show, workspace: updated)
+
+        rewrites ->
+          warnings =
+            Enum.map(rewrites, &DeprecatedConfigPaths.warning/1)
+
+          json(
+            conn,
+            Map.put(
+              WorkspaceJSON.show(%{workspace: updated}),
+              :warnings,
+              warnings
+            )
+          )
+      end
     end
   end
 

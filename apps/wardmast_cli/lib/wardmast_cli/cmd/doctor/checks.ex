@@ -14,6 +14,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     Distribution,
     KeyBackup,
     ProviderClis,
+    SandboxKey,
     Scope,
     SecretsAtRest
   }
@@ -101,6 +102,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
        plain(&check_agy_ssh_transport/0)},
       {"egress_jail", :sandboxes, nil, :egress, &check_egress_jail/1},
       {"podman_sandbox", :sandboxes, nil, :podman, &check_podman_sandbox/1},
+      {"sandbox_backend_key", :sandboxes, nil, :always, plain(&SandboxKey.check/0)},
       {"private_clone_records", :sandboxes, nil, :always, plain(&check_private_clone_records/0)},
       {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
       {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},

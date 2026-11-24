@@ -528,14 +528,35 @@ defmodule WardmastWeb.Api.WorkspaceControllerTest do
       assert body["config"]["repo_paths"]["arbiter"] == "/srv/arbiter"
     end
 
-    test "refuses sandbox.backend at the root and names the canonical path", %{conn: conn, ws: ws} do
+    test "refuses permissions.mode at the root and names the canonical path", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"permissions" => %{"mode" => "strict"}}
+        })
+
+      body = json_response(conn, 422)
+      assert inspect(body) =~ "agent.security.permissions.mode"
+    end
+
+    # bd-4j0nfe: a root `sandbox.*` is a deprecated alias, written canonically.
+    @tag capture_log: true
+    test "a root sandbox.backend is stored at agent.security.sandbox.backend", %{
+      conn: conn,
+      ws: ws
+    } do
       conn =
         patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
           "patch" => %{"sandbox" => %{"backend" => "podman"}}
         })
 
-      body = json_response(conn, 422)
-      assert inspect(body) =~ "agent.security.sandbox.backend"
+      body = json_response(conn, 200)
+      refute Map.has_key?(body["config"], "sandbox")
+      assert body["config"]["agent"]["security"]["sandbox"]["backend"] == "podman"
+      assert [warning] = body["warnings"]
+      assert warning =~ "`sandbox.backend` is deprecated"
     end
 
     test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
