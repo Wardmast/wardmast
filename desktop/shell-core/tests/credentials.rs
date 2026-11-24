@@ -1,8 +1,9 @@
 //! PKG 9: first-run credentials. The OS keychain is a stub, per platform.
 
 use arbiter_shell_core::credentials::{
-    base64, classify_get, ensure, keychain_ref, prepare, ref_env, CmdOutput, CredentialError, Os,
-    OsStore, SecretStore, StoreError, CLOAK_ACCOUNT, SECRET_KEY_BASE_ACCOUNT, SERVICE,
+    base64, classify_get, ensure, keychain_ref, prepare, prepare_with, ref_env, CmdOutput,
+    CredentialError, Os, OsStore, SecretStore, StoreError, CLOAK_ACCOUNT, SECRET_KEY_BASE_ACCOUNT,
+    SERVICE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -440,4 +441,33 @@ fn an_existing_service_install_is_never_given_a_second_cloak_key() {
     assert!(matches!(err, CredentialError::Local { .. }));
     assert!(err.to_string().contains("already has an encryption key"));
     assert!(store.0.lock().unwrap().sets.is_empty());
+}
+
+#[test]
+fn refs_the_operator_already_set_are_left_alone_and_the_keychain_is_not_touched() {
+    // A deployment (or the CI smoke test, which has no Secret Service) points
+    // the release at its own secrets; the shell must not override them or
+    // generate keychain items next to them.
+    let store = FakeStore::default();
+    store.0.lock().unwrap().get_error = Some(StoreError::Unavailable);
+    let d = dir("operator-refs");
+    let set = |name: &str| match name {
+        "WARDMAST_CLOAK_KEY_REF" => Some("file:/k/cloak".to_string()),
+        "SECRET_KEY_BASE_REF" => Some("file:/k/skb".to_string()),
+        _ => None,
+    };
+
+    let env = prepare_with(&store, &d, &|_| panic!("must not generate"), &set);
+
+    assert!(env.is_empty(), "{env:?}");
+    assert!(store.0.lock().unwrap().sets.is_empty());
+}
+
+#[test]
+fn only_one_operator_ref_set_still_manages_both_through_the_keychain() {
+    let store = FakeStore::default();
+    let d = dir("one-ref");
+    let set = |name: &str| (name == "SECRET_KEY_BASE_REF").then(|| "file:/k/skb".to_string());
+
+    assert_eq!(prepare_with(&store, &d, &rand, &set), ref_env());
 }

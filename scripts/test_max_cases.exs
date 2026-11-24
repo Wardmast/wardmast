@@ -9,11 +9,21 @@
 #
 # `ARB_TEST_MAX_CASES=N` sets ExUnit's `max_cases`. Unset, a worker session
 # (`ARB_WORKER_BEAD_ID`, which the spawn env always injects) gets a quarter of
-# the schedulers, min 2; ExUnit's own default (2x schedulers) caps three
+# the schedulers, min 2, max 4; ExUnit's own default (2x schedulers) caps three
 # concurrent workers' suites into a swap storm. Developer and CI runs keep the
 # ExUnit default. A bad value (non-integer, < 1) warns and falls back.
+#
+# The cap of 4 is hygiene, NOT the fix for the cluster-pod OOM kills (bd-76727c):
+# measured, a `mix test` BEAM peaks at ~1.7 GiB anon at max_cases 1 and 4 and
+# ~2.0 GiB at 16, so concurrency barely moves the peak
+# (docs/worker-memory-cap.md, "Cluster pods"). It only stops a many-core host from
+# fanning out dozens of concurrent DB cases.
+#
+# What bounds the number: `System.schedulers_online/0` defaults to the CPUs the BEAM
+# may use, i.e. its CPU affinity and, on OTP 23+, the cgroup `cpu_quota` (a 2-CPU pod
+# gets 2 schedulers, so max_cases 2); the hard cap of 4 bounds it on a many-core host.
 fn env ->
-  worker_default = fn -> [max_cases: max(2, div(System.schedulers_online(), 4))] end
+  worker_default = fn -> [max_cases: min(4, max(2, div(System.schedulers_online(), 4)))] end
 
   fallback = fn ->
     if env["ARB_WORKER_BEAD_ID"] in [nil, ""], do: [], else: worker_default.()

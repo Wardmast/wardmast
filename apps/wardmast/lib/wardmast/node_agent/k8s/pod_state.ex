@@ -80,26 +80,26 @@ defmodule Wardmast.NodeAgent.K8s.PodState do
     status = pod["status"] || %{}
     worker = container_state(status["containerStatuses"], @worker)
 
-    with nil <- outcome(status, worker),
+    with nil <- outcome(pod, status, worker),
          nil <- live(pod, worker) do
       pre_start(pod, status, opts)
     end
   end
 
   # The rows that end the run (or interrupt it), in precedence order.
-  defp outcome(status, worker) do
+  defp outcome(pod, status, worker) do
     cond do
       status["phase"] == "Failed" and status["reason"] == "DeadlineExceeded" ->
-        {:exit, exit_info(status, worker, :deadline)}
+        {:exit, exit_info(pod, status, worker, :deadline)}
 
       match?({:terminated, %{"exitCode" => 0}}, worker) ->
-        {:exit, exit_info(status, worker, :exited)}
+        {:exit, exit_info(pod, status, worker, :exited)}
 
       disruption = disruption(status) ->
         {:interrupted, interruption(disruption)}
 
       match?({:terminated, _}, worker) ->
-        {:exit, exit_info(status, worker, nil)}
+        {:exit, exit_info(pod, status, worker, nil)}
 
       failed = failed_init(status) ->
         {:exit, init_failed(status, failed)}
@@ -281,7 +281,7 @@ defmodule Wardmast.NodeAgent.K8s.PodState do
 
   # --- outcomes ---------------------------------------------------------------
 
-  defp exit_info(status, worker, reason) do
+  defp exit_info(pod, status, worker, reason) do
     {code, oom?} =
       case worker do
         {:terminated, t} -> {t["exitCode"], t["reason"] == "OOMKilled"}
@@ -294,7 +294,25 @@ defmodule Wardmast.NodeAgent.K8s.PodState do
       reason: reason || if(oom?, do: :oom_killed, else: :exited),
       snapshot: snapshot(status)
     }
+    |> put_memory_limit(oom? && worker_memory_limit(pod))
   end
+
+  # bd-76727c: an OOM kill used to read "the node's memory cap" with no figure. The cap
+  # is on the worker container in the pod spec (the LimitRange default or the config's
+  # `worker.limits.memory`, whichever the API admitted), so name it.
+  defp worker_memory_limit(pod) do
+    containers = get_in(pod, ["spec", "containers"]) || []
+
+    Enum.find_value(containers, fn
+      %{"name" => @worker} = c -> get_in(c, ["resources", "limits", "memory"])
+      _ -> nil
+    end)
+  end
+
+  defp put_memory_limit(info, limit) when is_binary(limit) and limit != "",
+    do: Map.put(info, :memory_limit, limit)
+
+  defp put_memory_limit(info, _limit), do: info
 
   defp init_failed(status, %{"name" => name, "state" => %{"terminated" => t}}) do
     %{

@@ -10,6 +10,7 @@
 
 use crate::quit::{self, LiveWork, QuitPrompt};
 use crate::supervisor::{Config, State, StopOutcome, Supervisor};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
@@ -21,13 +22,35 @@ pub enum CloseAction {
 pub enum QuitOutcome {
     /// The release was stopped; the shell process may exit.
     Quit(StopOutcome),
-    /// The user declined; everything keeps running.
+    /// The user declined (or another quit prompt is already open); everything keeps running.
     Cancelled,
+}
+
+/// What the event loop (`RunEvent::ExitRequested`) must do when an exit is
+/// requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitAction {
+    /// `request_quit` has already confirmed and stopped the release; let the
+    /// event loop finish exiting.
+    AllowExit,
+    /// The exit has not gone through `request_quit` yet (e.g. an OS-level
+    /// quit); call `api.prevent_exit()` and run `request_quit`.
+    PreventAndRequestQuit,
 }
 
 pub struct Shell {
     supervisor: Supervisor,
     api_token: Option<String>,
+    quitting: AtomicBool,
+    exit_approved: AtomicBool,
+}
+
+struct ResetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ResetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Shell {
@@ -37,6 +60,8 @@ impl Shell {
         Shell {
             supervisor: Supervisor::start(config),
             api_token,
+            quitting: AtomicBool::new(false),
+            exit_approved: AtomicBool::new(false),
         }
     }
 
@@ -57,6 +82,17 @@ impl Shell {
         CloseAction::HideToTray
     }
 
+    /// An exit was requested on the event loop (`RunEvent::ExitRequested`).
+    /// Only allows the process to exit once `request_quit` has confirmed with
+    /// the user (when needed) and stopped the release.
+    pub fn on_exit_requested(&self) -> ExitAction {
+        if self.exit_approved.load(Ordering::SeqCst) {
+            ExitAction::AllowExit
+        } else {
+            ExitAction::PreventAndRequestQuit
+        }
+    }
+
     pub fn live_work(&self) -> LiveWork {
         match self.supervisor.state() {
             State::Running { port } => quit::query_live_work(port, self.api_token.as_deref()),
@@ -66,10 +102,20 @@ impl Shell {
     }
 
     pub fn request_quit(&self, prompt: &dyn QuitPrompt) -> QuitOutcome {
+        if self
+            .quitting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return QuitOutcome::Cancelled;
+        }
+        let _guard = ResetOnDrop(&self.quitting);
         let live = self.live_work();
         if live != LiveWork::Idle && !prompt.confirm_quit(&live) {
             return QuitOutcome::Cancelled;
         }
-        QuitOutcome::Quit(self.supervisor.stop())
+        let outcome = self.supervisor.stop();
+        self.exit_approved.store(true, Ordering::SeqCst);
+        QuitOutcome::Quit(outcome)
     }
 }

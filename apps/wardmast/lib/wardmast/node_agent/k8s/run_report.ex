@@ -42,6 +42,7 @@ defmodule Wardmast.NodeAgent.K8s.RunReport do
       "snapshot" => info |> Map.get(:snapshot) |> word()
     })
     |> put_present("detail", Map.get(info, :message) || Map.get(info, :detail))
+    |> put_present("memory_limit", Map.get(info, :memory_limit))
   end
 
   def exit(entry, {:interrupted, info}) do

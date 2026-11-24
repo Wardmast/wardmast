@@ -155,3 +155,52 @@ fn a_boot_failure_is_reported_and_the_shell_can_still_quit() {
     sh.expect_line("quit stopped");
     assert!(sh.child.wait().unwrap().success());
 }
+
+#[test]
+fn an_os_level_quit_with_live_workers_prompts_and_never_kills_the_server_silently() {
+    let dir = workdir("os-quit");
+    let mut sh = Shell::launch(
+        &dir,
+        &[("FAKE_IN_FLIGHT", "2"), ("SHELL_QUIT_ANSWER", "no")],
+    );
+    sh.expect_line("dashboard ");
+
+    // Cmd+Q / RunEvent::ExitRequested: intercepted, prompts, declined.
+    sh.send("os-quit");
+    sh.expect_line("os-exit-prevented");
+    sh.expect_line("quit-prompt busy=2");
+    sh.expect_line("quit cancelled");
+    assert!(
+        !log(&dir).contains(&"term".to_string()),
+        "a declined OS quit must keep the server"
+    );
+
+    // The user agrees on the next attempt: the release is drained, then exit.
+    sh.send("answer yes");
+    sh.send("os-quit");
+    sh.expect_line("os-exit-prevented");
+    sh.expect_line("quit-prompt busy=2");
+    sh.expect_line("quit stopped graceful");
+    assert!(sh.child.wait().unwrap().success());
+    let l = log(&dir);
+    assert!(
+        l.contains(&"term".to_string()) && l.contains(&"exit clean".to_string()),
+        "{l:?}"
+    );
+}
+
+#[test]
+fn the_default_single_instance_socket_lives_in_the_app_runtime_dir() {
+    let dir = workdir("runtime-dir");
+    // Relative to the shell's cwd (`dir`), to stay under the sun_path limit.
+    let runtime = dir.join("xdg");
+    let mut sh = Shell::launch(&dir, &[("SHELL_SOCKET", ""), ("XDG_RUNTIME_DIR", "xdg")]);
+    sh.expect_line("dashboard ");
+    assert!(
+        runtime.join("arbiter").join("shell.sock").exists(),
+        "socket should be under $XDG_RUNTIME_DIR/arbiter"
+    );
+    sh.send("quit");
+    sh.expect_line("quit stopped");
+    assert!(sh.child.wait().unwrap().success());
+}
