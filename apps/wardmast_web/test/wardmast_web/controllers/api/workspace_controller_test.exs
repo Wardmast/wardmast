@@ -555,6 +555,8 @@ defmodule WardmastWeb.Api.WorkspaceControllerTest do
       body = json_response(conn, 200)
       refute Map.has_key?(body["config"], "sandbox")
       assert body["config"]["agent"]["security"]["sandbox"]["backend"] == "podman"
+      assert [warning] = body["warnings"]
+      assert warning =~ "`sandbox.backend` is deprecated"
     end
 
     test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
