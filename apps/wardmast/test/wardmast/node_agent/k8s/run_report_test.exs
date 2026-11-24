@@ -35,6 +35,22 @@ defmodule Wardmast.NodeAgent.K8s.RunReportTest do
     assert %{"reason" => "unschedulable", "message" => "0/3 nodes"} = RunReport.inventory(entry)
   end
 
+  describe "exit/2 for an OOM-killed worker" do
+    test "the pod's memory limit rides on the exit report (bd-76727c)" do
+      entry = %{run: "run-1", pod: "arb-run-1", cancelled: nil}
+      info = %{exit_code: 137, oom?: true, reason: :oom_killed, memory_limit: "4Gi"}
+
+      assert %{"oom" => true, "memory_limit" => "4Gi"} = RunReport.exit(entry, {:exit, info})
+    end
+
+    test "no limit known: the key is absent" do
+      entry = %{run: "run-1", pod: "arb-run-1", cancelled: nil}
+      info = %{exit_code: 137, oom?: true, reason: :oom_killed}
+
+      refute Map.has_key?(RunReport.exit(entry, {:exit, info}), "memory_limit")
+    end
+  end
+
   describe "exit/2 for a failed seed" do
     test "the seed's message is the exit's detail, and the reason is init_failed" do
       entry = %{run: "run-1", pod: "arb-run-1", cancelled: nil}

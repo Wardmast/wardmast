@@ -450,6 +450,7 @@ defmodule Wardmast.Nodes.RunStreams do
       |> put_pod_disrupted(exit)
       |> put_preempted(exit)
       |> put_checkout_failed(exit)
+      |> put_memory_limit(exit)
 
     flushed =
       for frame <- LineSplitter.flush(s.partial),
@@ -468,6 +469,13 @@ defmodule Wardmast.Nodes.RunStreams do
     do: Map.put(outcome, :checkout_failed?, true)
 
   defp put_checkout_failed(outcome, _exit), do: outcome
+
+  # bd-76727c: the container's memory limit, so an OOM kill names the cap that was hit.
+  defp put_memory_limit(outcome, %{"memory_limit" => limit})
+       when is_binary(limit) and limit != "",
+       do: Map.put(outcome, :memory_limit, limit)
+
+  defp put_memory_limit(outcome, _exit), do: outcome
 
   # A5: the pod was evicted, preempted or deleted from outside. Only set when true, so a
   # machine node's outcome map is exactly what it was.
