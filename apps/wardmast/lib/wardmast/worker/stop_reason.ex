@@ -1147,7 +1147,7 @@ defmodule Wardmast.Worker.StopReason do
              "(e.g. 24G or 60%) and restart the server, or set it to off. The macOS watchdog " <>
              "is polling-based, so the real peak may have been higher."}
 
-        :node ->
+        :cluster ->
           {"memory cap exceeded: the worker's container hit its memory limit (#{max}) on " <>
              "its node and was OOM-killed — the agent and everything it had spawned " <>
              "(compile, `mix test`, a headless browser) shared that one limit; the server was not",
@@ -1155,6 +1155,15 @@ defmodule Wardmast.Worker.StopReason do
              "`worker.limits.memory` in the controller config and the namespace's LimitRange " <>
              "max (docs/worker-memory-cap.md, \"Cluster pods\"), or run fewer heavy commands " <>
              "at once (one BEAM at a time). Re-dispatching the same work can hit it again."}
+
+        :node ->
+          {"memory cap exceeded: the worker's container hit its memory cap (#{max}) on " <>
+             "its node and was OOM-killed — the agent and everything it had spawned " <>
+             "(compile, `mix test`, a headless browser) shared that one cap; the server was not",
+           "The cap is the node's `podman run --memory` share of its memory " <>
+             "(`remote_worker_memory_share`, 40% of the node's MemTotal by default): raise " <>
+             "that share, or run fewer heavy commands at once (one BEAM at a time). " <>
+             "Re-dispatching the same work can hit it again."}
 
         _ ->
           {"memory cap exceeded: the worker's process tree hit its per-worker limit " <>
@@ -1180,20 +1189,26 @@ defmodule Wardmast.Worker.StopReason do
   The `memory_cap_exceeded/2` info for a container OOM-killed on a node (bd-76727c).
   The cap is, in order: the limit the pod's worker container actually carried
   (`outcome.memory_limit`, read from the pod spec), the limit the spawn asked for, then
-  a generic name. A node reports no peak: the kubelet exposes none after the kill.
+  a generic name. `source` tells the node kinds apart, since the remedy differs: only a
+  cluster (k8s) pod's exit carries `memory_limit` (set by `PodState`), so a present
+  limit means `:cluster` (LimitRange / controller config) and anything else is a
+  machine node's `podman --memory` cap, `:node`. Neither reports a peak after the kill.
   """
   @spec remote_memory_cap_info(map(), String.t() | nil) :: %{
           max: String.t(),
           peak: nil,
-          source: :node
+          source: :cluster | :node
         }
   def remote_memory_cap_info(outcome, spawn_cap) do
+    pod_limit = Map.get(outcome, :memory_limit)
+    cluster? = is_binary(pod_limit) and pod_limit != ""
+
     max =
-      [Map.get(outcome, :memory_limit), spawn_cap]
+      [pod_limit, spawn_cap]
       |> Enum.find(&(is_binary(&1) and &1 != ""))
       |> Kernel.||("the node's memory cap")
 
-    %{max: max, peak: nil, source: :node}
+    %{max: max, peak: nil, source: if(cluster?, do: :cluster, else: :node)}
   end
 
   @doc """

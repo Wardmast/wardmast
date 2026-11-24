@@ -245,10 +245,16 @@ check is the run transcript's last two commands.
 * The kill is attributed: `PodState` reads the worker container's limit from the
   pod spec, the exit report carries it (`memory_limit`), and the run's failure
   reason reads "the worker's container hit its memory limit (4Gi) on its node".
-* Worker test default concurrency (`scripts/test_max_cases.exs`) follows the
-  CPUs the cgroup allows (`logical_processors_available`), not the node's cores,
-  and is capped at 4; a guard in `apps/wardmast_release_env/test/test_max_cases_test.exs`
-  keeps that bound.
+* Worker test default concurrency (`scripts/test_max_cases.exs`) is capped at 4,
+  with a guard in `apps/wardmast_release_env/test/test_max_cases_test.exs`. This is
+  **hygiene, not the fix**: the table above shows the BEAM's peak is nearly flat in
+  `max_cases`, so the cap does not lower the peak that caused the kills.
+* The failure remediation is node-kind aware: a cluster pod (its exit carries the
+  pod's limit) is pointed at the LimitRange and controller config; a machine node
+  at its `podman run --memory` share (`remote_worker_memory_share`).
+
+**Still to do, and not code:** raise the cluster limit (below) and/or serialise
+heavy BEAMs. That is the operator's call and is what actually addresses the kills.
 
 ### Raising the limit (operator)
 

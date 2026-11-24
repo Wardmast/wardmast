@@ -11,15 +11,7 @@ defmodule WardmastReleaseEnv.TestMaxCasesTest do
     %{opts: fun}
   end
 
-  defp worker_default do
-    cpus =
-      case :erlang.system_info(:logical_processors_available) do
-        n when is_integer(n) and n >= 1 -> min(n, System.schedulers_online())
-        _ -> System.schedulers_online()
-      end
-
-    min(4, max(2, div(cpus, 4)))
-  end
+  defp worker_default, do: min(4, max(2, div(System.schedulers_online(), 4)))
 
   test "explicit value wins, in and out of a worker", %{opts: opts} do
     assert opts.(%{"ARB_TEST_MAX_CASES" => "3"}) == [max_cases: 3]
@@ -35,18 +27,11 @@ defmodule WardmastReleaseEnv.TestMaxCasesTest do
     assert opts.(%{"ARB_WORKER_BEAD_ID" => "bd-x"}) == [max_cases: worker_default()]
   end
 
-  # bd-76727c: the memory-OOM regression guard. Whatever the host's core count, a worker
-  # session never defaults above 4 concurrent cases (a 4Gi cluster pod shares its limit
-  # with the agent), and never above what the cgroup's CPU quota lets it use.
-  test "a worker's default is bounded by 4 and by the usable CPUs", %{opts: opts} do
-    [max_cases: n] = opts.(%{"ARB_WORKER_BEAD_ID" => "bd-x"})
-
+  # bd-76727c: hygiene, not the OOM fix (peak is ~flat in max_cases). A worker session
+  # never defaults above 4 concurrent cases, whatever the host's core count.
+  test "a worker's default is bounded to 2..4", %{opts: opts} do
+    assert [max_cases: n] = opts.(%{"ARB_WORKER_BEAD_ID" => "bd-x"})
     assert n in 2..4
-
-    case :erlang.system_info(:logical_processors_available) do
-      cpus when is_integer(cpus) and cpus >= 1 -> assert n <= max(2, div(cpus, 4))
-      _ -> :ok
-    end
   end
 
   test "bad values warn and fall back", %{opts: opts} do

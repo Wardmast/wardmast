@@ -1287,7 +1287,7 @@ defmodule Wardmast.Worker.StopReasonTest do
 
     test "a container OOM on a node names its cap and the node-side remediation (bd-76727c)" do
       info = StopReason.remote_memory_cap_info(%{oom?: true, memory_limit: "4Gi"}, nil)
-      assert info == %{max: "4Gi", peak: nil, source: :node}
+      assert info == %{max: "4Gi", peak: nil, source: :cluster}
 
       reason = StopReason.memory_cap_exceeded(info, 137)
 
@@ -1296,6 +1296,18 @@ defmodule Wardmast.Worker.StopReasonTest do
       refute reason.summary =~ "MemoryMax"
       refute reason.remediation =~ "raise WARDMAST_WORKER_MEMORY_MAX"
       assert reason.remediation =~ "LimitRange"
+    end
+
+    test "a podman node's OOM (no pod limit) gets podman wording, not LimitRange (bd-76727c)" do
+      info = StopReason.remote_memory_cap_info(%{oom?: true}, "12700m")
+      assert info == %{max: "12700m", peak: nil, source: :node}
+
+      reason = StopReason.memory_cap_exceeded(info, 137)
+
+      assert reason.summary =~ "12700m"
+      assert reason.remediation =~ "podman run --memory"
+      refute reason.remediation =~ "LimitRange"
+      refute reason.remediation =~ "worker.limits.memory"
     end
 
     test "remote_memory_cap_info/2 prefers the pod's own limit, then the spawn's, then a generic name" do
