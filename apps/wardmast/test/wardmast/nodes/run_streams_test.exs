@@ -182,6 +182,21 @@ defmodule Wardmast.Nodes.RunStreamsTest do
       assert S.live(t) == []
     end
 
+    test "an OOM exit's memory_limit reaches the outcome (bd-76727c)" do
+      {t, _} = S.ready(table(), "r1")
+
+      {t, _} =
+        S.exit(t, "r1", %{
+          "status" => 137,
+          "oom" => true,
+          "memory_limit" => "4Gi",
+          "size" => 0,
+          "cancelled" => false
+        })
+
+      assert {:ok, %{oom?: true, memory_limit: "4Gi"}} = S.outcome(t, "r1")
+    end
+
     test "an exit whose bytes already arrived finishes at once; a repeated exit is just re-acked" do
       {t, _} = S.ready(table(), "r1")
       {t, _} = S.data(t, "r1", 0, "x\n")

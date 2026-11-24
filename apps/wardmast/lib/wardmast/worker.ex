@@ -3320,15 +3320,19 @@ defmodule Wardmast.Worker do
   # tells them apart. Asked once, at exit, and only for a non-zero exit.
   # A container on a node is capped by `podman run --memory`, and the node reads
   # `.State.OOMKilled` after the exit (RW9): that is its `oom?`.
-  defp mark_memory_cap(%{remote_outcome: %{oom?: true}} = session, status)
+  defp mark_memory_cap(%{remote_outcome: %{oom?: true} = outcome} = session, status)
        when is_integer(status) and status != 0 do
-    max = Map.get(session, :remote_memory_cap) || "the node's memory cap"
+    info =
+      Wardmast.Worker.StopReason.remote_memory_cap_info(
+        outcome,
+        Map.get(session, :remote_memory_cap)
+      )
 
     Logger.warning(
-      "Worker: agent container on a node exceeded its memory cap (#{max}) and was OOM-killed"
+      "Worker: agent container on a node exceeded its memory cap (#{info.max}) and was OOM-killed"
     )
 
-    Map.put(session, :memory_cap_exceeded, %{max: max, peak: nil})
+    Map.put(session, :memory_cap_exceeded, info)
   end
 
   defp mark_memory_cap(session, status) when is_integer(status) and status != 0 do
