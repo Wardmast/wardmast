@@ -25,7 +25,9 @@ defmodule WardmastWeb.Api.WorkspaceController do
   alias Wardmast.Params
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Tasks.Workspace.ConfigSchema
+  alias Wardmast.Tasks.Workspace.DeprecatedConfigPaths
   alias Wardmast.Tasks.Workspace.Operations
+  alias WardmastWeb.Api.WorkspaceJSON
   alias WardmastWeb.Api.WorkspaceParam
 
   action_fallback WardmastWeb.Api.FallbackController
@@ -139,12 +141,12 @@ defmodule WardmastWeb.Api.WorkspaceController do
 
         rewrites ->
           warnings =
-            Enum.map(rewrites, &Wardmast.Tasks.Workspace.DeprecatedConfigPaths.warning/1)
+            Enum.map(rewrites, &DeprecatedConfigPaths.warning/1)
 
           json(
             conn,
             Map.put(
-              WardmastWeb.Api.WorkspaceJSON.show(%{workspace: updated}),
+              WorkspaceJSON.show(%{workspace: updated}),
               :warnings,
               warnings
             )
