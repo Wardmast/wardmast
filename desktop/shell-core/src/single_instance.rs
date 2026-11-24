@@ -402,7 +402,10 @@ mod tests {
                 None,
                 Some(PathBuf::from("/Users/u"))
             ),
-            PathBuf::from("/Users/u/.wardmast/run/shell.sock")
+            // The home-derived default is per platform (macOS: Application Support).
+            crate::data_home::default_for(std::env::consts::OS, std::path::Path::new("/Users/u"))
+                .join("run")
+                .join("shell.sock")
         );
     }
 
