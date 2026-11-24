@@ -2807,14 +2807,16 @@ defmodule Wardmast.MCP.ToolsTest do
   end
 
   describe "workspace_config_set/2 unknown top-level key (bd-311cun)" do
-    test "refuses sandbox.backend at the root and names the canonical path", ctx do
+    # A root `sandbox.*` is an alias now (bd-4j0nfe,
+    # workspace_config_deprecated_sandbox_test.exs); `permissions` is still refused.
+    test "refuses permissions.mode at the root and names the canonical path", ctx do
       assert {:error, {_, msg}} =
                Tools.workspace_config_set(ctx.coordinator, %{
-                 "key" => "sandbox.backend",
-                 "value" => "podman"
+                 "key" => "permissions.mode",
+                 "value" => "strict"
                })
 
-      assert msg =~ "agent.security.sandbox.backend"
+      assert msg =~ "agent.security.permissions.mode"
     end
 
     test "the canonical path writes", ctx do

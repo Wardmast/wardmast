@@ -152,7 +152,126 @@ defmodule Wardmast.Boot.ConfigMigratorTest do
     end
   end
 
+  # bd-4j0nfe: a root `sandbox` key is read by nothing (SecurityPolicy reads
+  # `agent.security.sandbox`), yet `arb config get sandbox` showed it as live.
+  describe "migrate_root_sandbox/1" do
+    # `:create` folds a root `sandbox` itself now, so a legacy config is planted
+    # with raw SQL, the way a pre-bd-4j0nfe `force` write left it.
+    defp plant_ws!(name, config) do
+      ws = create_ws!(name, %{})
+
+      Wardmast.Repo.query!("UPDATE workspaces SET config = ?1 WHERE id = ?2", [
+        Jason.encode!(config),
+        ws.id
+      ])
+
+      ws
+    end
+
+    defp canonical_sandbox(ws), do: get_in(reload!(ws).config, ["agent", "security", "sandbox"])
+
+    test "root auto vs canonical bwrap: the canonical value wins and the root value is reported dropped" do
+      ws =
+        plant_ws!("disagree", %{
+          "sandbox" => %{"backend" => "auto"},
+          "agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}
+        })
+
+      log = capture_log(fn -> send(self(), {:r, ConfigMigrator.migrate_root_sandbox()}) end)
+      assert_received {:r, [result]}
+
+      assert result.workspace == "disagree"
+      assert result.status == :migrated
+      assert result.dropped == [{"sandbox.backend", "auto"}]
+      assert result.moved == []
+
+      refute Map.has_key?(reload!(ws).config, "sandbox")
+      assert canonical_sandbox(ws) == %{"backend" => "bwrap"}
+
+      assert log =~ "disagree"
+      assert log =~ "sandbox.backend"
+      assert log =~ ~s("auto")
+      assert log =~ "agent.security.sandbox.backend"
+    end
+
+    test "a root value with no canonical counterpart moves onto the canonical path" do
+      ws =
+        plant_ws!("root-only", %{
+          "sandbox" => %{"backend" => "podman", "egress" => "allowlist"},
+          "agent" => %{"security" => %{"sandbox" => %{"review_backend" => "podman"}}}
+        })
+
+      capture_log(fn -> send(self(), {:r, ConfigMigrator.migrate_root_sandbox()}) end)
+      assert_received {:r, [result]}
+
+      assert Enum.sort(result.moved) == [
+               {"sandbox.backend", "agent.security.sandbox.backend"},
+               {"sandbox.egress", "agent.security.sandbox.egress"}
+             ]
+
+      assert result.dropped == []
+
+      assert canonical_sandbox(ws) == %{
+               "backend" => "podman",
+               "egress" => "allowlist",
+               "review_backend" => "podman"
+             }
+
+      refute Map.has_key?(reload!(ws).config, "sandbox")
+    end
+
+    test "an equal root value is neither moved nor dropped, only cleared" do
+      ws =
+        plant_ws!("agree", %{
+          "sandbox" => %{"backend" => "auto"},
+          "agent" => %{"security" => %{"sandbox" => %{"backend" => "auto"}}}
+        })
+
+      capture_log(fn -> send(self(), {:r, ConfigMigrator.migrate_root_sandbox()}) end)
+      assert_received {:r, [%{moved: [], dropped: [], status: :migrated}]}
+
+      assert reload!(ws).config == %{
+               "agent" => %{"security" => %{"sandbox" => %{"backend" => "auto"}}}
+             }
+    end
+
+    test "a non-map root sandbox is cleared and reported dropped" do
+      ws = plant_ws!("junk-root", %{"sandbox" => "podman"})
+
+      capture_log(fn -> send(self(), {:r, ConfigMigrator.migrate_root_sandbox()}) end)
+      assert_received {:r, [%{dropped: [{"sandbox", "podman"}], status: :migrated}]}
+      refute Map.has_key?(reload!(ws).config, "sandbox")
+    end
+
+    test "is a no-op without a root sandbox, and idempotent" do
+      create_ws!("clean", %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}})
+      plant_ws!("once", %{"sandbox" => %{"backend" => "podman"}})
+
+      capture_log(fn -> assert [%{workspace: "once"}] = ConfigMigrator.migrate_root_sandbox() end)
+      assert ConfigMigrator.migrate_root_sandbox() == []
+    end
+
+    test "apply?: false reports without writing" do
+      ws = plant_ws!("dry", %{"sandbox" => %{"backend" => "podman"}})
+
+      capture_log(fn ->
+        assert [%{status: :dry_run}] = ConfigMigrator.migrate_root_sandbox(apply?: false)
+      end)
+
+      assert reload!(ws).config == %{"sandbox" => %{"backend" => "podman"}}
+    end
+  end
+
   describe "start_link/1" do
+    @tag capture_log: true
+    test "folds a root sandbox on the primary instance" do
+      ws = plant_ws!("primary-sandbox", %{"sandbox" => %{"backend" => "podman"}})
+
+      assert ConfigMigrator.start_link(primary?: true) == :ignore
+      refute Map.has_key?(reload!(ws).config, "sandbox")
+      assert get_in(reload!(ws).config, ["agent", "security", "sandbox", "backend"]) == "podman"
+    end
+
     test "migrates and returns :ignore on the primary instance" do
       ws = create_ws!("primary", %{"rig_paths" => %{"tonic" => "/srv/tonic"}})
 
