@@ -460,8 +460,9 @@ defmodule Wardmast.Trackers.Linear do
     body = "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
     add_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false), do: assign_user(ref, user_id)
-    :ok
+    if Map.get(ctx, :assign, false),
+      do: ref |> assign_user(user_id) |> Wardmast.Trackers.Tracker.assign_outcome(),
+      else: :ok
   end
 
   # ---- Public helpers ------------------------------------------------------

@@ -14,18 +14,21 @@ defmodule WardmastCli.Cmd.Claim do
   through the workspace's configured tracker adapter — GitHub, Jira,
   Shortcut, etc. — so `<ref>` is whatever that tracker uses: a GitHub issue
   number (`arb claim 43`), a Jira key (`arb claim AX-1234`), a Shortcut story
-  id, and so on. The adapter fetches the issue, verifies it's assigned to the
-  workspace's authenticated user (the adapter-defined claim signal), and
-  either creates a new task or returns the existing one if a task already
+  id, and so on. The adapter fetches the issue and refuses it only if it is
+  assigned to SOMEONE ELSE. An unassigned story is simply claimed: the task is
+  created and the story is assigned to the workspace's authenticated user on
+  the tracker (best effort — if that write fails the task is still created and
+  the reply carries a warning). It then either creates a new task or returns the existing one if a task already
   references that issue.
 
   Flags:
-    --assign       Also take ownership of the tracker issue. Without it the
-                   tracker owner is never changed; the result reports
-                   owner_changed.
-    --force        Skip the assignment-as-claim check. Use only when you
-                   *know* you want a task for an issue you don't own (e.g.
-                   to track someone else's work).
+    --assign       Also assign the tracker issue to you. Largely redundant:
+                   unassigned stories are assigned to you on claim anyway,
+                   and a story owned by someone else is refused. The result
+                   reports owner_changed (and any warnings).
+    --force        Skip the prior-claim check (another installation's claim
+                   comment). NOT needed for an unassigned story; it does not
+                   override a story assigned to someone else.
     --difficulty N Task difficulty (0..5): D0 trivial · D1 easy · D2 medium ·
                    D3 hard · D4 extreme · D5 flagship (a deliberate
                    escalation for work worth a full quota window — not
@@ -167,6 +170,8 @@ defmodule WardmastCli.Cmd.Claim do
     IO.puts(
       "  #{String.pad_trailing(row["ref"] || "", 10)} #{String.pad_trailing(row["status"] || "", 13)} #{row["title"]}#{suffix}"
     )
+
+    for w <- row["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{row["ref"]}: #{w}")
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -189,6 +194,8 @@ defmodule WardmastCli.Cmd.Claim do
     IO.puts("  title:        #{task["title"]}")
     IO.puts("  state:        #{task["state"]}")
     IO.puts("  tracker:      #{task["tracker_type"]}:#{task["tracker_ref"]}")
+
+    for w <- payload["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{w}")
 
     if repo do
       IO.puts("")

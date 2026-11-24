@@ -464,8 +464,9 @@ defmodule Wardmast.Trackers.Shortcut do
 
     post_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false), do: assign_user(ref, member_id)
-    :ok
+    if Map.get(ctx, :assign, false),
+      do: ref |> assign_user(member_id) |> Wardmast.Trackers.Tracker.assign_outcome(),
+      else: :ok
   end
 
   @impl true

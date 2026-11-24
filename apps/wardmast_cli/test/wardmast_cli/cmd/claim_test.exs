@@ -42,6 +42,22 @@ defmodule WardmastCli.Cmd.ClaimTest do
     assert out =~ "github:43"
   end
 
+  test "assignment-failure warnings are printed to stderr" do
+    stub_routes([
+      @workspace_lookup,
+      {{"post", "/api/workspaces/ws-1/claim"},
+       {%{
+          "status" => "created",
+          "task" => %{"id" => "bd-abc", "title" => "T", "state" => "backlog"},
+          "warnings" => ["could not assign the story"]
+        }, 201}}
+    ])
+
+    {_out, err, code} = capture(fn -> Claim.run(["43"]) end)
+    assert code == 0
+    assert err =~ "warning: could not assign the story"
+  end
+
   test "existing task → 'Already claimed'" do
     stub_routes([
       @workspace_lookup,

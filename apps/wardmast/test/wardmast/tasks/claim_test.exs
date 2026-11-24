@@ -200,6 +200,60 @@ defmodule Wardmast.Tasks.ClaimTest do
       assert {:error, {:not_assigned, @viewer}} = Claim.claim(ws, "43")
     end
 
+    test "an unassigned issue is claimed without force and assigned to the viewer", %{
+      github_ws: ws
+    } do
+      gh_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43")
+      assert owner == %{changed: true, old: [], new: [@viewer]}
+      assert_received :assignee_write
+    end
+
+    test "a failed tracker assignment still creates the task and warns", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "boom"})
+        end
+      end)
+
+      assert {:ok, :created, %Issue{} = task, owner} = Claim.claim_with_owner(ws, "43")
+      assert %{changed: false, warnings: [warning]} = owner
+      assert warning =~ "could not assign"
+      assert %{warnings: [^warning]} = Claim.serialize_claim(:created, task, owner)
+    end
+
+    test "label identity (GitHub App mode) warns instead of claiming an assignment", %{
+      github_ws: ws
+    } do
+      stub_gh(fn conn -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{}) end)
+
+      ctx = %{
+        workspace_name: "w",
+        workspace_prefix: "bd",
+        current_user: "label:arbiter",
+        host: "h",
+        assign: true
+      }
+
+      _ = ws
+      assert {:warn, msg} = Wardmast.Trackers.GitHub.signal_claim("43", "bd-1", ctx)
+      assert msg =~ "label"
+    end
+
     test "force: true bypasses the assignment check", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
@@ -520,6 +574,37 @@ defmodule Wardmast.Tasks.ClaimTest do
       assert task.title == "Wire up the thing"
     end
 
+    test "an unowned story is claimed without force and assigned to the member", %{sc_ws: ws} do
+      sc_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43")
+      assert owner == %{changed: true, old: [], new: [@sc_member_id]}
+      assert_received {:owner_write, %{"owner_ids" => [@sc_member_id]}}
+    end
+
+    test "a failed Shortcut assignment still creates the task and warns", %{sc_ws: ws} do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"GET", "/api/v3/stories/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, sc_story_payload(%{"owner_ids" => []}))
+
+          {"POST", "/api/v3/stories/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/api/v3/stories/43"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "boom"})
+        end
+      end)
+
+      assert {:ok, :created, %Issue{}, %{warnings: [_]}} = Claim.claim_with_owner(ws, "43")
+    end
+
     test "refuses when the story is not owned by the current member", %{sc_ws: ws} do
       stub_sc(fn conn ->
         case {conn.method, conn.request_path} do
@@ -584,11 +669,11 @@ defmodule Wardmast.Tasks.ClaimTest do
       end)
     end
 
-    test "github: force on an unowned issue leaves assignees alone", %{github_ws: ws} do
-      gh_stub_reporting([])
+    test "github: an already-owned issue's assignees are left alone", %{github_ws: ws} do
+      gh_stub_reporting([%{"login" => @viewer}])
 
-      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43", force: true)
-      assert owner == %{changed: false, old: [], new: []}
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43")
+      assert owner == %{changed: false, old: [@viewer], new: [@viewer]}
       refute_received :assignee_write
     end
 
@@ -609,11 +694,11 @@ defmodule Wardmast.Tasks.ClaimTest do
                Claim.claim_with_owner(ws, "43", assign: true)
     end
 
-    test "shortcut: force on an unowned story leaves owner_ids alone", %{sc_ws: ws} do
-      sc_stub_reporting([])
+    test "shortcut: an already-owned story's owner_ids are left alone", %{sc_ws: ws} do
+      sc_stub_reporting([@sc_member_id])
 
-      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43", force: true)
-      assert owner == %{changed: false, old: [], new: []}
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43")
+      assert owner == %{changed: false, old: [@sc_member_id], new: [@sc_member_id]}
       refute_received {:owner_write, _}
     end
 
@@ -630,7 +715,7 @@ defmodule Wardmast.Tasks.ClaimTest do
     test "serialize_claim/3 carries owner_changed", %{sc_ws: ws} do
       sc_stub_reporting([])
       {:ok, status, task, owner} = Claim.claim_with_owner(ws, "43", force: true)
-      assert %{owner_changed: %{changed: false}} = Claim.serialize_claim(status, task, owner)
+      assert %{owner_changed: %{changed: true}} = Claim.serialize_claim(status, task, owner)
     end
   end
 
@@ -934,6 +1019,24 @@ defmodule Wardmast.Tasks.ClaimTest do
         if pr_ref, do: Ash.update!(task, %{pr_ref: pr_ref}), else: task
       end)
       |> Ash.update!(%{close_upstream: false}, action: :close)
+    end
+
+    test "sync does not auto-claim an unassigned story (only assigned-to-viewer ones)", %{
+      github_ws: ws
+    } do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          # The viewer-scoped listing never returns the unassigned issue.
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            assert conn.query_string =~ "assignee=#{@viewer}"
+            Req.Test.json(conn, [])
+        end
+      end)
+
+      assert {:ok, []} = Claim.plan(ws)
     end
 
     test "an open-but-unassigned tracker issue does NOT propose a close", %{github_ws: ws} do
