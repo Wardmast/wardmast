@@ -92,9 +92,15 @@ defmodule Wardmast.Worker.Image do
   # (trixie + trixie-security) so the build can still find it after Debian drops it from
   # the live mirrors. Bump both together, on purpose: the Containerfile text changes, so
   # the base hash changes and the release rebuilds it (that is how security updates land).
-  # The snapshot URIs are http:// on purpose: debian:trixie-slim ships no ca-certificates until
-  # the apt-get below installs it, so https would fail at `apt-get update`. Integrity comes
-  # from Signed-By + the signed InRelease.
+  #
+  # bd-dgxrme: the snapshot is used ONLY for chromium/chromium-common/chromium-sandbox
+  # (apt pinning: 1001 for those, -1 for everything else from the snapshot). General
+  # packages (build-essential etc.) come from the live deb.debian.org mirrors: installing
+  # them from a frozen snapshot on top of debian:trixie-slim breaks once the base image
+  # ships a newer libc6 than the snapshot's libc6-dev depends on. The snapshot source and
+  # pin are removed after the install, so derived images get plain live sources (bd-31nok0).
+  # Snapshot URIs are http:// on purpose: trixie-slim ships no ca-certificates until the
+  # apt-get install; integrity comes from Signed-By + the signed InRelease.
   @chromium_snapshot "20261101T000000Z"
   @chromium_version "156.0.8078.73-1~deb13u1"
 
@@ -143,24 +149,6 @@ defmodule Wardmast.Worker.Image do
     FROM docker.io/library/debian:trixie-slim
     RUN printf '%s\\n' \\
           'Types: deb' \\
-          'URIs: http://snapshot.debian.org/archive/debian/#{@chromium_snapshot}/' \\
-          'Suites: trixie trixie-updates' \\
-          'Components: main' \\
-          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
-          '' \\
-          'Types: deb' \\
-          'URIs: http://snapshot.debian.org/archive/debian-security/#{@chromium_snapshot}/' \\
-          'Suites: trixie-security' \\
-          'Components: main' \\
-          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
-          > /etc/apt/sources.list.d/debian.sources
-    RUN apt-get -o Acquire::Check-Valid-Until=false update \\
-     && apt-get install -y --no-install-recommends \\
-          bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
-          openssh-client procps socat sqlite3 tini tmux \\
-          chromium=#{@chromium_version} chromium-common=#{@chromium_version} fonts-liberation \\
-     && printf '%s\\n' \\
-          'Types: deb' \\
           'URIs: http://deb.debian.org/debian' \\
           'Suites: trixie trixie-updates' \\
           'Components: main' \\
@@ -172,6 +160,36 @@ defmodule Wardmast.Worker.Image do
           'Components: main' \\
           'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
           > /etc/apt/sources.list.d/debian.sources \\
+     && printf '%s\\n' \\
+          'Types: deb' \\
+          'URIs: http://snapshot.debian.org/archive/debian/#{@chromium_snapshot}/' \\
+          'Suites: trixie trixie-updates' \\
+          'Components: main' \\
+          'Check-Valid-Until: no' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          '' \\
+          'Types: deb' \\
+          'URIs: http://snapshot.debian.org/archive/debian-security/#{@chromium_snapshot}/' \\
+          'Suites: trixie-security' \\
+          'Components: main' \\
+          'Check-Valid-Until: no' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          > /etc/apt/sources.list.d/chromium-snapshot.sources \\
+     && printf '%s\\n' \\
+          'Package: chromium chromium-common chromium-sandbox' \\
+          'Pin: origin snapshot.debian.org' \\
+          'Pin-Priority: 1001' \\
+          '' \\
+          'Package: *' \\
+          'Pin: origin snapshot.debian.org' \\
+          'Pin-Priority: -1' \\
+          > /etc/apt/preferences.d/chromium-snapshot
+    RUN apt-get -o Acquire::Check-Valid-Until=false update \\
+     && apt-get install -y --no-install-recommends \\
+          bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
+          openssh-client procps socat sqlite3 tini tmux \\
+          chromium=#{@chromium_version} chromium-common=#{@chromium_version} fonts-liberation \\
+     && rm -f /etc/apt/sources.list.d/chromium-snapshot.sources /etc/apt/preferences.d/chromium-snapshot \\
      && rm -rf /var/lib/apt/lists/*
     # Pinned forge host keys (bd-290vof): `git fetch origin` over ssh verifies strictly.
     #{KnownHosts.containerfile_run()}
