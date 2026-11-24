@@ -486,6 +486,157 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # macOS desktop app (bd-5oa113, PKG 27, docs/desktop-shell.md): the Tauri shell
+  # with the darwin-arm64 release from `build-macos` bundled inside, packaged as
+  # Arbiter-<version>-macos-arm64[...].dmg and attached to the same GitHub Release.
+  #
+  # Signing is opt-in by secret. With APPLE_CERTIFICATE (+ _PASSWORD) the app and
+  # every Mach-O file in it are signed with that Developer ID; with APPLE_ID,
+  # APPLE_PASSWORD (app-specific) and APPLE_TEAM_ID on top, the app and .dmg are
+  # notarised and stapled and verified with codesign/spctl. Without any of them
+  # the job still produces a .dmg, named ...-unsigned.dmg, so a fork or a repo
+  # that never enrolled in the Apple Developer Program keeps releasing. A
+  # half-set secret fails the job (package-macos.sh) rather than downgrade silently.
+  #
+  # The .app is smoke-tested before it is published, from the .dmg itself: it must
+  # start the bundled release with its data home under
+  # ~/Library/Application Support/Wardmast (a private HOME stands in, the app is
+  # given no WARDMAST_DATA_HOME so its own default is what runs), open the
+  # dashboard, and stop the release on Quit.
+  #
+  # Like build-macos, nothing needs this job: a failure turns the run red but
+  # never holds back the tarballs, the image or the chart.
+  desktop-macos:
+    name: Desktop app (macOS arm64 .dmg)
+    needs: [build, build-macos]
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    permissions:
+      contents: write
+
+    env:
+      RUST_VERSION: "1.91.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the pinned Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: desktop-tauri-release-macos-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      - name: Fetch the darwin-arm64 release published by build-macos
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release"
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "arbiter-${TAG}-darwin-arm64.tar.gz*" --dir "${RUNNER_TEMP}/release"
+          (cd "${RUNNER_TEMP}/release" && shasum -a 256 -c "arbiter-${TAG}-darwin-arm64.tar.gz.sha256")
+          echo "RELEASE_TARBALL=${RUNNER_TEMP}/release/arbiter-${TAG}-darwin-arm64.tar.gz" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Stage the release for bundling
+        run: desktop/scripts/stage-release.sh "${RELEASE_TARBALL}"
+
+      - name: Build the .app
+        working-directory: desktop/src-tauri
+        run: |
+          # One merged config: the release resources plus this tag's version.
+          python3 - "${APP_VERSION}" <<'PY'
+          import json, sys
+          conf = json.load(open("tauri.release.conf.json"))
+          conf["version"] = sys.argv[1]
+          json.dump(conf, open("tauri.release.version.conf.json", "w"))
+          PY
+          npx --yes @tauri-apps/cli@2 build --ci --bundles app \
+            --config tauri.release.version.conf.json
+          test -x target/release/bundle/macos/Arbiter.app/Contents/MacOS/arbiter-desktop
+          test -x target/release/bundle/macos/Arbiter.app/Contents/Resources/release/bin/wardmast
+
+      - name: Sign and notarise (when the secrets exist), build the .dmg
+        # Secrets are passed through the environment; package-macos.sh decides
+        # from which of them are non-empty and prints which outcome it chose.
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          desktop/scripts/package-macos.sh \
+            desktop/src-tauri/target/release/bundle/macos/Arbiter.app \
+            "${RUNNER_TEMP}/dmg" "${APP_VERSION}" arm64
+          cat "${RUNNER_TEMP}/dmg/SIGNING_STATUS"
+
+      - name: Verify the signature a user's Mac would check
+        run: |
+          status="$(sed -n 's/^status=//p' "${RUNNER_TEMP}/dmg/SIGNING_STATUS")"
+          dmg="$(ls "${RUNNER_TEMP}"/dmg/*.dmg)"
+          mkdir -p "${RUNNER_TEMP}/mnt"
+          hdiutil attach "${dmg}" -nobrowse -readonly -mountpoint "${RUNNER_TEMP}/mnt"
+          app="${RUNNER_TEMP}/mnt/Arbiter.app"
+          codesign --verify --deep --strict --verbose=2 "${app}"
+          details="$(codesign -dv --verbose=4 "${app}" 2>&1)"
+          case "${status}" in
+            notarised)
+              xcrun stapler validate "${app}"
+              spctl --assess --type execute --verbose=4 "${app}"
+              grep -q "flags=.*runtime" <<<"${details}"
+              grep -q "Authority=Developer ID Application" <<<"${details}"
+              ;;
+            signed) grep -q "Authority=Developer ID Application" <<<"${details}" ;;
+            unsigned) echo "unsigned build: no Developer ID signature to check" ;;
+          esac
+          hdiutil detach "${RUNNER_TEMP}/mnt"
+
+      - name: Smoke test the app from the .dmg (data home, dashboard, Quit)
+        env:
+          # Private HOME: the app must derive ~/Library/Application Support/Wardmast
+          # from it by itself (no WARDMAST_DATA_HOME / ARB_DATA_HOME set).
+          RELEASE_DISTRIBUTION: none
+          RELEASE_NODE: desktop_smoke
+          PHX_SERVER: "true"
+        run: |
+          export HOME="${RUNNER_TEMP}/smoke-home"
+          mkdir -p "${HOME}"
+          unset WARDMAST_DATA_HOME ARB_DATA_HOME DATABASE_PATH
+          dmg="$(ls "${RUNNER_TEMP}"/dmg/*.dmg)"
+          mkdir -p "${RUNNER_TEMP}/mnt"
+          hdiutil attach "${dmg}" -nobrowse -readonly -mountpoint "${RUNNER_TEMP}/mnt"
+          ditto "${RUNNER_TEMP}/mnt/Arbiter.app" "${RUNNER_TEMP}/Arbiter.app"
+          hdiutil detach "${RUNNER_TEMP}/mnt"
+          SMOKE_EXPECT_DATA_HOME="${HOME}/Library/Application Support/Wardmast" \
+            desktop/scripts/smoke.sh "${RUNNER_TEMP}/Arbiter.app/Contents/MacOS/arbiter-desktop"
+          ls -la "${HOME}/Library/Application Support/Wardmast"
+
+      - name: Upload the .dmg as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arbiter-desktop-dmg
+          path: ${{ runner.temp }}/dmg/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          files: ${{ runner.temp }}/dmg/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # macOS Intel release (bd-5sp336): identical to build-macos but on GitHub's
   # Intel runner image, publishing arbiter-<tag>-darwin-x86_64.tar.gz (+ .sha256).
   # Independent of build-macos and needed by nothing else, so an Intel runner

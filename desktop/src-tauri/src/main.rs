@@ -17,13 +17,16 @@
 //! changes while a navigation is in flight is never lost.
 
 use arbiter_shell_core::credentials;
+use arbiter_shell_core::login_item::LoginItem;
 use arbiter_shell_core::quit::{self, LiveWork, QuitPrompt};
 use arbiter_shell_core::shell::{CloseAction, ExitAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
 use arbiter_shell_core::status_page;
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec, State};
+use arbiter_shell_core::tray_icon;
 use std::sync::{Arc, Mutex};
-use tauri::menu::{Menu, MenuItem};
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, Url, WindowEvent};
@@ -142,6 +145,19 @@ fn release_dir(context: &tauri::Context) -> std::path::PathBuf {
         .join("release")
 }
 
+/// The "Start at login" agent, macOS only (a launchd plist, see `login_item`).
+fn login_item() -> Option<LoginItem> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    let program = std::env::current_exe().ok()?;
+    Some(LoginItem::new(
+        LoginItem::agents_dir(std::path::Path::new(&home)),
+        program,
+    ))
+}
+
 fn main() {
     let socket = single_instance::default_socket_path();
     if quit_requested_by_argv() {
@@ -203,8 +219,7 @@ fn main() {
     // Adopt-or-refuse an orphaned release instead of starting a second server
     // on the same database (docs/desktop-shell.md, "Orphaned release").
     config.data_home = arbiter_shell_core::release_lock::resolve_data_home();
-    config.expected_version =
-        arbiter_shell_core::release_lock::bundled_version(&release_dir);
+    config.expected_version = arbiter_shell_core::release_lock::bundled_version(&release_dir);
     let shell = Arc::new(Shell::start(config, None));
     *shell_slot.lock().unwrap() = Some(Arc::clone(&shell));
 
@@ -234,15 +249,67 @@ fn main() {
 
                 let open = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "Quit Arbiter", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&open, &quit])?;
+                let sep = PredefinedMenuItem::separator(app)?;
+
+                // Login-item toggle (macOS). A moved or updated app repoints the
+                // agent at itself on every launch while the toggle is on.
+                let login = login_item();
+                let login_check = match &login {
+                    Some(item) => {
+                        if let Err(e) = item.refresh() {
+                            eprintln!("arbiter-desktop: login item refresh failed: {e}");
+                        }
+                        Some(CheckMenuItem::with_id(
+                            app,
+                            "login",
+                            "Start at login",
+                            true,
+                            item.is_enabled(),
+                            None::<&str>,
+                        )?)
+                    }
+                    None => None,
+                };
+
+                let mut items = vec![&open as &dyn tauri::menu::IsMenuItem<tauri::Wry>];
+                if let Some(check) = &login_check {
+                    items.push(check);
+                }
+                items.push(&sep);
+                items.push(&quit);
+                let menu = Menu::with_items(app, &items)?;
+
                 let tray_shell = Arc::clone(&shell);
                 let mut tray = TrayIconBuilder::new().menu(&menu);
-                if let Some(icon) = app.default_window_icon() {
+                if cfg!(target_os = "macos") {
+                    // A template image: macOS tints it for light/dark mode.
+                    tray = tray
+                        .icon(Image::new_owned(
+                            tray_icon::template_rgba(tray_icon::SIZE),
+                            tray_icon::SIZE,
+                            tray_icon::SIZE,
+                        ))
+                        .icon_as_template(true);
+                } else if let Some(icon) = app.default_window_icon() {
                     tray = tray.icon(icon.clone());
                 }
                 tray.on_menu_event(move |app, ev| match ev.id().as_ref() {
                     "open" => show_main(app),
                     "quit" => begin_quit(app, &tray_shell),
+                    "login" => {
+                        if let (Some(item), Some(check)) = (&login, &login_check) {
+                            let result = if item.is_enabled() {
+                                item.disable()
+                            } else {
+                                item.enable()
+                            };
+                            if let Err(e) = result {
+                                eprintln!("arbiter-desktop: login item toggle failed: {e}");
+                            }
+                            // Show what is on disk, whatever the click did.
+                            let _ = check.set_checked(item.is_enabled());
+                        }
+                    }
                     _ => {}
                 })
                 .build(app)?;
