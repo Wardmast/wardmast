@@ -90,3 +90,4 @@ accounts.json
 /desktop/src-tauri/gen/
 # A real release staged for bundling (desktop/scripts/stage-release.sh).
 /desktop/src-tauri/release-bundle/
+/desktop/src-tauri/tauri.release.version.conf.json
