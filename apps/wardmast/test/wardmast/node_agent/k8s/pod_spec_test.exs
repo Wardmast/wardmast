@@ -287,7 +287,9 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       pod = build!()
 
       memory_backed =
-        for v <- pod["spec"]["volumes"], get_in(v, ["emptyDir", "medium"]) == "Memory", do: v["name"]
+        for v <- pod["spec"]["volumes"],
+            get_in(v, ["emptyDir", "medium"]) == "Memory",
+            do: v["name"]
 
       assert memory_backed == ["run"]
 
