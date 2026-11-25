@@ -534,7 +534,6 @@ spec:
         sizeLimit: 8Gi
       name: work
     - emptyDir:
-        medium: Memory
         sizeLimit: 1Gi
       name: tmp
     - emptyDir:
