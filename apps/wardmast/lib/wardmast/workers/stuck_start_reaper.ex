@@ -13,7 +13,9 @@ defmodule Wardmast.Workers.StuckStartReaper do
   The gate now discards a start that failed (`Wardmast.Worker.ReviewGate`); this
   is the backstop for every other path, and for rows an earlier build left behind:
 
-    * a **live worker** in `:starting` with no live agent, started more than
+    * a **live worker** in `:starting` that never opened an agent session (a worker
+      holding for a resume backoff or quota wait has opened one and is left alone),
+      started more than
       `timeout_ms/0` ago, is ended `interrupted` with the typed `:spawn_failed`
       stop reason and stopped, so its id is free again;
     * a **`starting` run row** past the timeout that no live worker owns is ended
@@ -92,9 +94,13 @@ defmodule Wardmast.Workers.StuckStartReaper do
 
     live = Worker.list_children()
     workers = live |> Enum.filter(&stuck_worker?(&1, cutoff)) |> Enum.flat_map(&reap_worker/1)
-    live_run_ids = live |> Enum.map(& &1[:run_id]) |> Enum.reject(&is_nil/1) |> MapSet.new()
 
-    %{workers: workers, runs: reap_rows(cutoff, live_run_ids)}
+    # A live worker owns its run row even when its snapshot probe timed out (the
+    # degraded entry carries no `run_id`), so ownership is by run id, task id or
+    # registry key.
+    owned = live |> Enum.flat_map(&[&1[:run_id], &1[:task_id], &1[:registry_key]]) |> MapSet.new()
+
+    %{workers: workers, runs: reap_rows(cutoff, owned)}
   rescue
     e ->
       Logger.warning("StuckStartReaper: sweep failed: #{Exception.message(e)}")
@@ -105,8 +111,16 @@ defmodule Wardmast.Workers.StuckStartReaper do
       %{workers: [], runs: []}
   end
 
+  # Only a start that never opened an agent session is stuck. A worker holding at
+  # `:starting` for a resume backoff or a quota wait has `agent_live: false` too,
+  # but its session is on record (`session_opened`) and a respawn is scheduled.
   defp stuck_worker?(
-         %{state: :starting, agent_live: false, started_at: %DateTime{} = at},
+         %{
+           state: :starting,
+           agent_live: false,
+           session_opened: false,
+           started_at: %DateTime{} = at
+         },
          cutoff
        ),
        do: DateTime.compare(at, cutoff) == :lt
@@ -132,11 +146,11 @@ defmodule Wardmast.Workers.StuckStartReaper do
     :exit, _ -> []
   end
 
-  defp reap_rows(cutoff, live_run_ids) do
+  defp reap_rows(cutoff, owned) do
     Run
     |> Ash.Query.filter(state == :starting and started_at < ^cutoff)
     |> Ash.read!()
-    |> Enum.reject(&MapSet.member?(live_run_ids, &1.id))
+    |> Enum.reject(&(MapSet.member?(owned, &1.id) or MapSet.member?(owned, &1.task_id)))
     |> Enum.flat_map(&end_row/1)
   end
 

@@ -83,6 +83,48 @@ defmodule Wardmast.Workers.StuckStartReaperTest do
     assert run_for(fresh).state == :starting
   end
 
+  # Review finding: a worker holding at :starting for a resume backoff or a quota
+  # wait has agent_live false and an old started_at, but its session is on record.
+  test "a worker holding at :starting after its session exited (resume backoff) is not reaped" do
+    id = "bd-backoff-#{System.unique_integer([:positive])}"
+    pid = start_ghost(id)
+
+    :sys.replace_state(pid, fn st ->
+      session = %{exited_at: DateTime.utc_now(), started_at: DateTime.utc_now()}
+      %{st | claude_sessions: %{make_ref() => session}}
+    end)
+
+    assert %{state: :starting, agent_live: false, session_opened: true} = Worker.state(pid)
+
+    assert %{workers: []} =
+             StuckStartReaper.sweep(now: later(StuckStartReaper.timeout_ms() + 1_000))
+
+    assert Worker.whereis(id) == pid
+    assert run_for(id).state == :starting
+    Worker.stop(pid, :normal)
+  end
+
+  # Review nit: a live worker owns its task's run rows even when the snapshot probe
+  # that would carry its run_id timed out; ownership also matches on task id.
+  test "a stale :starting row whose task id a live worker holds is left alone" do
+    id = "bd-owned-#{System.unique_integer([:positive])}"
+    pid = start_ghost(id)
+
+    row =
+      Ash.create!(Run, %{
+        task_id: id,
+        repo: "arbiter",
+        workspace_id: "ws-reap",
+        state: :starting,
+        started_at: later(-3 * 3_600_000),
+        output_lines: []
+      })
+
+    assert %{runs: []} = StuckStartReaper.sweep()
+    assert Ash.get!(Run, row.id).state == :starting
+    Worker.stop(pid, :normal)
+  end
+
   test "the reaped run no longer shows as an active worker" do
     base = "bd-ghost-list-#{System.unique_integer([:positive])}"
     id = base <> "#review#impl1"
