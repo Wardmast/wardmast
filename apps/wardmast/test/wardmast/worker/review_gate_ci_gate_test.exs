@@ -381,6 +381,74 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # GitHub #1657 (vs-5mks8i): a resumed author re-enters the gate on a head a
+    # reviewer already approved, CI is red past the re-run cap, an earlier round's
+    # implementer is still registered `:starting`, and a fix round's implementer
+    # cannot start (`:not_a_private_clone`). That is an infrastructure failure, not
+    # a reviewer's verdict: it used to be delivered as REQUEST_CHANGES (no
+    # `review_gate_rounds` row, the old rounds' payload replayed) and, the second
+    # time, escalated as "not converging (identical findings)".
+    test "red CI whose fix-round implementer cannot start is no REQUEST_CHANGES and no repeat-findings escalation",
+         ctx do
+      Wardmast.Test.StubFixRoundDispatcher.reset()
+      rig = rig(ctx, "feature/ci-ghost")
+      impl_id = rig.task.id <> "#review#impl1"
+
+      {:ok, _} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: rig.task.id,
+          run_id: Ecto.UUID.generate(),
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          converged: true,
+          findings: "VERDICT: APPROVE"
+        })
+
+      {:ok, ghost} =
+        Wardmast.Worker.start(
+          task_id: impl_id,
+          repo: "trib/repo",
+          workspace_id: nil,
+          meta: %{role: :implementer, revises: rig.task.id}
+        )
+
+      ghost_ref = Process.monitor(ghost)
+      {:ok, 1} = Wardmast.Worker.CiRerunBudget.record(rig.task.id, rig.head, :known_flake)
+      {:ok, 2} = Wardmast.Worker.CiRerunBudget.record(rig.task.id, rig.head, :known_flake)
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed])
+
+      refused = {:not_a_private_clone, "/wt", :not_a_private_clone}
+
+      gate =
+        start_gate(rig, ctx,
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          session_start: fn _opts -> {:error, refused} end
+        )
+
+      gate_ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
+      assert_receive {:DOWN, ^ghost_ref, :process, ^ghost, _}, Wardmast.Test.Timing.scale(5_000)
+
+      issue = Ash.get!(Issue, rig.task.id)
+      refute issue.review_gate_state["verdict"] == "request_changes"
+      refute issue.attention_cause == :review_gate_not_converged
+      assert Wardmast.Test.StubFixRoundDispatcher.dispatch_count() == 0
+
+      rounds =
+        Wardmast.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^rig.task.id)
+        |> Ash.read!()
+
+      assert Enum.map(rounds, & &1.verdict) == [:approve]
+    end
+
     test "the gate's one re-run is booked on the SHA tally", ctx do
       rig = rig(ctx, "feature/ci-rerun-book")
 

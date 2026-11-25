@@ -310,6 +310,7 @@ config :wardmast, :loop_canary_ticker, enabled: false
 config :wardmast, :budget_patrol, enabled: false
 config :wardmast, :spend_watch, enabled: false
 config :wardmast, :spend_patrol, enabled: false
+config :wardmast, :stuck_start_reaper, enabled: false
 
 # G18: a spawn never asks the host's real agent CLI for its `--version`; a test
 # that needs a harness version hands `Wardmast.Agents.HarnessVersion` a fake one.

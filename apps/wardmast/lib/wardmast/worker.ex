@@ -10877,6 +10877,10 @@ defmodule Wardmast.Worker do
       # list`, the MCP tools, the worker lifecycle broadcast — gets the answer
       # without a second call into this process.
       agent_live: session_live?(s),
+      # GitHub #1657: whether this worker ever opened an agent session. A worker
+      # holding at :starting for a resume backoff or a quota wait has agent_live
+      # false but has opened one; only a start that never produced a session is stuck.
+      session_opened: s.claude_sessions != %{},
       started_at: s.started_at,
       step_started_at: s.step_started_at,
       mr_ref: s.mr_ref,
