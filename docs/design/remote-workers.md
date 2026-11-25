@@ -938,7 +938,7 @@ worker:
   requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}
   limits:   {cpu: "2", memory: 4Gi}
   work_size_limit: 8Gi             # emptyDir "work"
-  tmp_size_limit: 1Gi              # memory emptyDir, counted against the memory limit
+  tmp_size_limit: 1Gi              # disk emptyDir (bd-c22gf1; was memory), counted against ephemeral-storage
 services_resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
 placement:
   node_selector: {}                # empty by default: workers spread over the whole cluster (§20.2); a pin such as {kubernetes.io/hostname: my-cluster} is an option, not the default
@@ -1499,7 +1499,7 @@ Decisions the design left open, and what the tests pin:
 
 Choices the design left open:
 
-* **Snapshot scratch space is `/tmp`** (the memory `emptyDir`, `tmp_size_limit`): the snapshot repo holds the blobs `git add -A` hashes for changed and untracked files, and the bundle is written next to it. A tree with more than ~`tmp_size_limit` of changed bytes fails the snapshot (logged, exit 1 on the final one). The untracked-payload veto (`ARB_MAX_UNTRACKED_BYTES`, default 50 MB, the primary's own cap) fires first for new files.
+* **Snapshot scratch space is `/tmp`** (the disk `emptyDir`, `tmp_size_limit`): the snapshot repo holds the blobs `git add -A` hashes for changed and untracked files, and the bundle is written next to it. A tree with more than ~`tmp_size_limit` of changed bytes fails the snapshot (logged, exit 1 on the final one). The untracked-payload veto (`ARB_MAX_UNTRACKED_BYTES`, default 50 MB, the primary's own cap) fires first for new files.
 * **Commit identity** in the pod's clone is `arbiter <arbiter@localhost>` (the machine agent's shadow uses the same); `PrivateClone` copies the operator's.
 * **`.git/config`** differs from the host's only by `arbiter.mainRepo`, `origin`, upstream tracking, `core.alternateRefsPrefixes` and the identity (`PodLayoutContractTest`). `info/exclude` is the worker's to edit; the snapshotter honours it as a bandwidth optimisation and the primary re-filters.
 * **Not in K7:** the in-pod `socat` bridge listeners in the entry wrapper (the pod builder gives bridge *names* only, so the port per bridge is undecided), and the stdout numbering filter (K5 has no consumer yet). Both change `PodScripts.entry/0` and the goldens, and nothing in the cluster reads them yet.

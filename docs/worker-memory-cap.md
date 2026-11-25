@@ -206,8 +206,13 @@ the namespace's `LimitRange` max (set at `arb node … install` time from the
 
 What counts against that one limit: the agent CLI (~0.3–1 GiB), every BEAM the
 agent starts (compile, `mix test`, credo, dialyzer), a headless browser if the task
-starts one, **and** the pod's `/tmp` — a `medium: Memory` `emptyDir`
-(`tmp_size_limit`, 1Gi), whose bytes are charged to the container, not to disk.
+starts one, **and** (before bd-c22gf1) the pod's `/tmp`, a `medium: Memory` `emptyDir` whose
+bytes were charged to the container. `/tmp` is now a plain disk `emptyDir`
+(`tmp_size_limit`, 1Gi) and counts against the worker's `ephemeral-storage` limit
+(`work_size_limit + tmp_size_limit`, 9Gi by default; request 4Gi) instead. The only
+memory-backed volumes left are `run` (64Mi: the secret env file, which must never
+touch disk) and any run-service `tmpfs` entries (256Mi each, services only).
+`/dev/shm` is the runtime default, not a spec volume.
 
 ### What the 2026-11 kills were (bd-76727c)
 

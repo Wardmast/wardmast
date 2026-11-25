@@ -25,7 +25,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   | the `.git` guards | `.git` itself (K1-A8) then the four guards, `readOnly` `subPath` mounts |
   | the objects overlay | not applicable: the clone is self-contained |
   | per-run `HOME`, config dir | `subPath`s of `work` at the primary's paths |
-  | `/tmp`, `/dev/shm` | a memory `emptyDir` for `/tmp`; `/dev/shm` at the runtime default |
+  | `/tmp`, `/dev/shm` | a disk `emptyDir` for `/tmp` (not memory-backed); `/dev/shm` at the runtime default |
   | `-e NAME` | never in the spec: a memory file sourced and deleted by the entry wrapper |
   | `-e NAME=value` | `env:` literals |
   | `-v <cli>:…:ro` | an image layer: no mount |
@@ -1018,10 +1018,10 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   defp volumes(run, cfg) do
     [
       %{"name" => "work", "emptyDir" => %{"sizeLimit" => cfg.worker["work_size_limit"]}},
-      %{
-        "name" => "tmp",
-        "emptyDir" => %{"medium" => "Memory", "sizeLimit" => cfg.worker["tmp_size_limit"]}
-      },
+      # Disk-backed (no `medium: Memory`): tmpfs pages are charged to the pod's memory cgroup
+      # and were eating the worker's memory limit (bd-c22gf1). Its bytes count against the
+      # container's `ephemeral-storage` limit (work + tmp) instead.
+      %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => cfg.worker["tmp_size_limit"]}},
       %{"name" => "run", "emptyDir" => %{"medium" => "Memory", "sizeLimit" => @run_size}},
       %{"name" => "ca", "configMap" => %{"name" => @ca_configmap}}
     ] ++

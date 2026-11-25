@@ -90,6 +90,8 @@ workers:
   limits: {cpu: "2", memory: 4Gi}
   # Optional: left out of controller.yaml when empty (the controller's defaults, 8Gi / 1Gi).
   workSizeLimit: ""
+  # /tmp is a disk emptyDir (not memory-backed); its size counts toward the worker's
+  # ephemeral-storage limit (workSizeLimit + tmpSizeLimit unless limits sets one).
   tmpSizeLimit: ""
   # {requests: {cpu, memory, ephemeral-storage}, limits: {...}} for run services; empty = default.
   servicesResources: {}

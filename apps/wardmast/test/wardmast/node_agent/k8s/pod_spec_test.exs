@@ -271,16 +271,29 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
   end
 
   describe "§8 row 11: /tmp and /dev/shm" do
-    test "/tmp is a memory emptyDir with a sizeLimit; /dev/shm is left at the runtime default" do
+    test "/tmp is a disk emptyDir (no medium: Memory) with a sizeLimit; /dev/shm is left at the runtime default" do
       pod = build!()
 
       assert Enum.find(pod["spec"]["volumes"], &(&1["name"] == "tmp")) ==
-               %{"name" => "tmp", "emptyDir" => %{"medium" => "Memory", "sizeLimit" => "1Gi"}}
+               %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "1Gi"}}
 
       assert mount_at(pod, "/tmp") == %{"name" => "tmp", "mountPath" => "/tmp"}
       refute mount_at(pod, "/dev/shm")
       refute Enum.any?(pod["spec"]["volumes"], &(&1["name"] == "shm"))
       assert Enum.any?(podman_argv(), &String.starts_with?(&1, "/tmp:rw,nosuid,nodev"))
+    end
+
+    test "the only memory-backed volume left is `run` (64Mi, the secret env file); the ephemeral-storage limit covers work + tmp" do
+      pod = build!()
+
+      memory_backed =
+        for v <- pod["spec"]["volumes"], get_in(v, ["emptyDir", "medium"]) == "Memory", do: v["name"]
+
+      assert memory_backed == ["run"]
+
+      res = worker(pod)["resources"]
+      assert res["limits"]["ephemeral-storage"] == "9Gi"
+      assert res["requests"]["ephemeral-storage"] == "4Gi"
     end
 
     test "a `tmp` mount at /tmp does not create a second mount of /tmp" do
