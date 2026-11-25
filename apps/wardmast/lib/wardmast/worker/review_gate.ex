@@ -4870,6 +4870,11 @@ defmodule Wardmast.Worker.ReviewGate do
   defp refusal_retry_id(id, %{fix_refusal_retries: n}), do: "#{id}#r#{n}"
 
   defp park_unstartable_implementer(state, reason) do
+    Logger.warning(
+      "ReviewGate: task=#{state.task_id} round #{state.round} implementer could not be " <>
+        "spawned: #{inspect(reason)}"
+    )
+
     state =
       record_thread(
         state,
@@ -4878,11 +4883,48 @@ defmodule Wardmast.Worker.ReviewGate do
         "The implementer worker could not be spawned: #{inspect(reason)}"
       )
 
-    # bd-9zuvbh: an implementer that could not be spawned is a liveness
-    # failure, and when the reject it was standing in for came from a
-    # verdict guard the PR still has a reviewer's APPROVE on it. Same split
-    # as the round cap: park that, fail a genuine REQUEST_CHANGES.
-    {:done, finish(state, terminal_reject_verdict(state))}
+    {:done, finish(state, unstartable_verdict(state, reason))}
+  end
+
+  # GitHub #1657: what an implementer that cannot start reports depends on what
+  # opened the round.
+  #
+  #   * A reviewer's REQUEST_CHANGES (a round row is on record) stays one: the
+  #     reviewer did reject the head, and the author's own fix round is the
+  #     recovery (bd-9zuvbh: a verdict guard's reject parks instead).
+  #   * Red CI (`ci_fix_pending`) has no reviewer behind it. No reviewer rejected
+  #     the head and no round row exists, so delivering REQUEST_CHANGES invented a
+  #     verdict, replayed the gate's old thread as its findings, and — identical on
+  #     the next resume — read as "not converging". It is reported as what it is,
+  #     an inconclusive gate (`{:no_verdict, _}`: parked, escalated, no fix round,
+  #     no findings digest), naming the failure.
+  defp unstartable_verdict(%{ci_fix_pending: %{sha: sha, checks: checks}}, reason) do
+    {:no_verdict, unstartable_ci_payload(sha, checks, reason)}
+  end
+
+  defp unstartable_verdict(state, _reason), do: terminal_reject_verdict(state)
+
+  defp unstartable_ci_payload(sha, checks, reason) do
+    names =
+      checks
+      |> List.wrap()
+      |> Enum.map(&(&1 |> Map.get(:name) |> to_string()))
+      |> Enum.uniq()
+      |> Enum.join(", ")
+
+    """
+    ReviewGate could not start the implementer for the CI fix round on #{sha}.
+
+    CI is red on that head#{if names == "", do: "", else: " (failing jobs: #{names})"}, \
+    but the fix round's implementer could not be spawned:
+
+        #{inspect(reason)}
+
+    This is an infrastructure failure, not a reviewer's verdict: no reviewer \
+    rejected this head in this pass, and no fix round has run for these findings. \
+    Fix what stopped the implementer, then re-run the review.
+    """
+    |> String.trim()
   end
 
   # ---- the remote must not move under a fix round (bd-bq8c8a) --------------
@@ -8493,7 +8535,7 @@ defmodule Wardmast.Worker.ReviewGate do
         end_refused_reviewer(pid, state, reason)
 
       true ->
-        :ok
+        discard_unstarted(pid, reason)
     end
 
     error
@@ -8521,8 +8563,20 @@ defmodule Wardmast.Worker.ReviewGate do
         safe(fn -> Worker.stop(pid, :normal, 5_000) end)
 
       :error ->
-        :ok
+        discard_unstarted(pid, reason)
     end
+  end
+
+  # GitHub #1657: a pass whose start failed after its worker was registered
+  # (`:starting`, no agent) is discarded: ended `interrupted` with the typed
+  # `:spawn_failed` cause, then stopped so its id is free. Left registered it
+  # stayed the ticket's "current run" for good (`worker_list`, `arb prime`),
+  # and the next round with the same id was handed it back
+  # (`start_worker_process/4`). Best-effort: a worker already gone is fine.
+  defp discard_unstarted(pid, reason) do
+    safe(fn -> Worker.interrupt(pid, StopReason.spawn_failed(reason)) end)
+    safe(fn -> Worker.stop(pid, :normal, 5_000) end)
+    :ok
   end
 
   # bd-40pzpj: under `most_quota` routing the task's implementer pin decides
@@ -8586,8 +8640,30 @@ defmodule Wardmast.Worker.ReviewGate do
            meta: worker_meta(state, role, revision)
          ) do
       {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> reuse_or_replace(pid, state, id, role, revision)
       {:error, reason} -> {:error, {:worker_start_failed, reason}}
+    end
+  end
+
+  # GitHub #1657: the gate launches one pass at a time, so a worker already
+  # registered under this pass's id that is still `:starting` with no agent is a
+  # leftover of an earlier start that failed — never a pass in flight. Handing it
+  # back (as every `already_started` once was) ran the round on a dead
+  # registration; it is discarded and the pass gets a worker of its own. Any other
+  # registered worker is reused as before.
+  defp reuse_or_replace(pid, state, id, role, revision) do
+    case safe(fn -> Worker.state(pid) end) do
+      %{state: :starting, agent_live: false} ->
+        Logger.warning(
+          "ReviewGate: task=#{state.task_id} found a stuck `:starting` worker #{id} with " <>
+            "no agent; discarding it and starting the #{role} afresh"
+        )
+
+        discard_unstarted(pid, :ghost_worker)
+        start_worker_process(state, id, role, revision)
+
+      _ ->
+        {:ok, pid}
     end
   end
 

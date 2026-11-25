@@ -218,6 +218,9 @@ defmodule Wardmast.Application do
         # G19: parks a live quarantine/probation run past its tier's token or wall-clock
         # cap, and pages for an operator-set cap on a page tier.
         Wardmast.Guardrails.SpendPatrol,
+        # GitHub #1657: ends a run stuck in `starting` with no agent past a timeout, so
+        # a failed start cannot sit in `worker_list` / `arb prime` as an active worker.
+        Wardmast.Workers.StuckStartReaper,
         # Polls GitHub for a newer published release and records "update available"
         # (check + notify only; never deploys). Off in dev/test. See
         # Wardmast.Release.UpdateCheck.
