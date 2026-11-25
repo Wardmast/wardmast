@@ -87,6 +87,48 @@ defmodule Wardmast.Worker.ReviewGateGhostImplementerTest do
     assert Enum.all?(runs_for(impl_id), &(&1.state == :finished))
   end
 
+  # GitHub #1657 (bd-c22gf1): a conflict-resolve pass is no reviewer verdict either.
+  # Its implementer failing to start was delivered as REQUEST_CHANGES — "not
+  # converged after 1 round(s)" with no `review_gate_rounds` row.
+  test "a conflict-resolve pass whose implementer cannot start is no REQUEST_CHANGES", ctx do
+    Wardmast.Test.StubFixRoundDispatcher.reset()
+    rig = rig(ctx, "feature/rg-3")
+
+    # main moves and conflicts with the branch's feature.txt
+    git!(["checkout", "-q", "main"], ctx.repo)
+    File.write!(Path.join(ctx.repo, "feature.txt"), "main work\n")
+    git!(["add", "feature.txt"], ctx.repo)
+    git!(["commit", "-q", "-m", "main change"], ctx.repo)
+    git!(["push", "-q", "origin", "main"], ctx.repo)
+
+    refused = {:not_a_private_clone, "/wt", :not_a_private_clone}
+
+    log =
+      capture_log(fn ->
+        gate =
+          start_gate(rig, ctx,
+            session_start: fn _opts -> {:error, refused} end,
+            fix_refusal_max_retries: 0
+          )
+
+        ref = Process.monitor(gate)
+        assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(15_000)
+      end)
+
+    # the conflict-resolve pass is what failed to start, not the reviewer
+    assert log =~ "conflict-resolve pass 1/"
+    assert log =~ "implementer could not be spawned"
+
+    issue = Ash.get!(Issue, rig.task.id)
+    assert issue.review_gate_state["verdict"] == "no_verdict"
+    assert Wardmast.Test.StubFixRoundDispatcher.dispatch_count() == 0
+
+    assert Wardmast.ReviewGate.Round |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) ==
+             []
+
+    assert Worker.whereis(rig.task.id <> "#review#impl1") == nil
+  end
+
   defp runs_for(task_id) do
     Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
   end

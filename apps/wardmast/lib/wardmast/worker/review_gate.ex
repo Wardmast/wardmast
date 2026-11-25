@@ -1307,6 +1307,10 @@ defmodule Wardmast.Worker.ReviewGate do
       # `%{sha:, checks:}`. A round that ends with no diff reruns CI instead of
       # parking, `ci_noop_reruns` times at most.
       ci_fix_pending: nil,
+      # What opened the revise round in flight: :reviewer (a REQUEST_CHANGES, a round
+      # row on record), :ci, :screenshots or :conflict (no reviewer behind it). nil
+      # before any round (a re-armed pass). Read when the implementer cannot start.
+      revise_source: nil,
       ci_noop_reruns: 0,
       # RW8: a pass held because the primary's own worker cap is 0
       # (`Wardmast.Nodes.LocalCapacity`): `%{token:, info:, resume:}`, else nil.
@@ -1551,6 +1555,7 @@ defmodule Wardmast.Worker.ReviewGate do
       | conflict_passes: n + 1,
         conflict_pass?: true,
         conflict_pass_head: current_head_sha(state),
+        revise_source: :conflict,
         phase: :revising
     }
 
@@ -4704,6 +4709,7 @@ defmodule Wardmast.Worker.ReviewGate do
   # `{:done, state}` (escalated) if the implementer couldn't be spawned.
   defp enter_revise(state, findings, source \\ :reviewer) do
     state = record_enter_revise_thread(state, findings, source)
+    state = %{state | revise_source: source}
 
     state =
       if source == :reviewer,
@@ -4852,7 +4858,7 @@ defmodule Wardmast.Worker.ReviewGate do
         launch_implementer_now(%{state | fix_refusal_retries: retries}, findings, prompt_prefix)
 
       _ ->
-        park_unstartable_implementer(state, reason)
+        park_unstartable_implementer(state, reason, findings)
     end
   end
 
@@ -4869,7 +4875,7 @@ defmodule Wardmast.Worker.ReviewGate do
   defp refusal_retry_id(id, %{fix_refusal_retries: 0}), do: id
   defp refusal_retry_id(id, %{fix_refusal_retries: n}), do: "#{id}#r#{n}"
 
-  defp park_unstartable_implementer(state, reason) do
+  defp park_unstartable_implementer(state, reason, findings) do
     Logger.warning(
       "ReviewGate: task=#{state.task_id} round #{state.round} implementer could not be " <>
         "spawned: #{inspect(reason)}"
@@ -4883,7 +4889,7 @@ defmodule Wardmast.Worker.ReviewGate do
         "The implementer worker could not be spawned: #{inspect(reason)}"
       )
 
-    {:done, finish(state, unstartable_verdict(state, reason))}
+    {:done, finish(state, unstartable_verdict(state, reason, findings))}
   end
 
   # GitHub #1657: what an implementer that cannot start reports depends on what
@@ -4892,40 +4898,42 @@ defmodule Wardmast.Worker.ReviewGate do
   #   * A reviewer's REQUEST_CHANGES (a round row is on record) stays one: the
   #     reviewer did reject the head, and the author's own fix round is the
   #     recovery (bd-9zuvbh: a verdict guard's reject parks instead).
-  #   * Red CI (`ci_fix_pending`) has no reviewer behind it. No reviewer rejected
-  #     the head and no round row exists, so delivering REQUEST_CHANGES invented a
-  #     verdict, replayed the gate's old thread as its findings, and — identical on
-  #     the next resume — read as "not converging". It is reported as what it is,
-  #     an inconclusive gate (`{:no_verdict, _}`: parked, escalated, no fix round,
-  #     no findings digest), naming the failure.
-  defp unstartable_verdict(%{ci_fix_pending: %{sha: sha, checks: checks}}, reason) do
-    {:no_verdict, unstartable_ci_payload(sha, checks, reason)}
-  end
+  #   * Red CI, a screenshot requirement or a conflict-resolve pass has no reviewer
+  #     behind it. No reviewer rejected the head and no round row exists, so
+  #     delivering REQUEST_CHANGES invented a verdict, put the gate's thread in as
+  #     its findings ("not converged after N round(s)") and, identical on the next
+  #     resume, read as "not converging". It is reported as what it is, an
+  #     inconclusive gate (`{:no_verdict, _}`: parked, escalated, no fix round, no
+  #     findings digest), naming the failure.
+  defp unstartable_verdict(%{revise_source: source} = state, reason, findings)
+       when source in [:ci, :screenshots, :conflict],
+       do: {:no_verdict, unstartable_payload(state, source, reason, findings)}
 
-  defp unstartable_verdict(state, _reason), do: terminal_reject_verdict(state)
+  defp unstartable_verdict(state, _reason, _findings), do: terminal_reject_verdict(state)
 
-  defp unstartable_ci_payload(sha, checks, reason) do
-    names =
-      checks
-      |> List.wrap()
-      |> Enum.map(&(&1 |> Map.get(:name) |> to_string()))
-      |> Enum.uniq()
-      |> Enum.join(", ")
-
+  defp unstartable_payload(state, source, reason, findings) do
     """
-    ReviewGate could not start the implementer for the CI fix round on #{sha}.
+    ReviewGate could not start the implementer for the #{revise_source_label(source)} \
+    round (round #{state.round}, head #{state.head_sha}).
 
-    CI is red on that head#{if names == "", do: "", else: " (failing jobs: #{names})"}, \
-    but the fix round's implementer could not be spawned:
+    The implementer could not be spawned:
 
         #{inspect(reason)}
 
     This is an infrastructure failure, not a reviewer's verdict: no reviewer \
-    rejected this head in this pass, and no fix round has run for these findings. \
-    Fix what stopped the implementer, then re-run the review.
+    rejected this head in this pass, and no fix round has run for the findings \
+    below. Fix what stopped the implementer, then re-run the review.
+
+    ## What the round was opened for
+
+    #{cap(to_string(findings), 4_000)}
     """
     |> String.trim()
   end
+
+  defp revise_source_label(:ci), do: "red-CI fix"
+  defp revise_source_label(:screenshots), do: "UI-screenshot"
+  defp revise_source_label(:conflict), do: "conflict-resolve"
 
   # ---- the remote must not move under a fix round (bd-bq8c8a) --------------
   #
