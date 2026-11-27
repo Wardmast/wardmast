@@ -91,6 +91,12 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       # The marker is gone with the wait.
       assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
       stop_gate(gate)
     end
 
@@ -1578,6 +1584,12 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       assert Enum.any?(gate_messages(ctx, rig), &(&1.body =~ "CI did not gate this review"))
       assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
       stop_gate(gate)
     end
 
@@ -1684,6 +1696,12 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       assert Worker.whereis(rig.task.id) == nil
       assert implement_runs(rig) == 1
       assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
       stop_gate(gate)
     end
 
@@ -1777,6 +1795,12 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
                Reconciler.reconcile_ci_waits(rearm_fun: fn _ -> {:error, :no_worktree} end)
 
       assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
       me = self()
 
       assert {:ok, %{resumed: 1}} =
