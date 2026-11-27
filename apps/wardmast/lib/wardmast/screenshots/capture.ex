@@ -596,7 +596,10 @@ defmodule Wardmast.Screenshots.Capture do
   # its output) rather than as whatever the browser made of a refused or empty response.
   defp recheck_ready(st, spec, target) do
     if function_exported?(st.booter, :ready, 2) do
-      case safe_call(fn -> st.booter.ready(spec, target.handle) end, :ok) do
+      case safe_call(
+             fn -> st.booter.ready(spec, target.handle) end,
+             {:error, "the readiness probe crashed (the app process is gone)"}
+           ) do
         :ok ->
           :ok
 

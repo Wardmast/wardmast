@@ -117,6 +117,23 @@ defmodule Wardmast.Test.CdpFixtureApp do
     end
   end
 
+  # A transient network failure: the first three requests for an id get no response at all (the
+  # handler dies, the socket closes: the browser's ERR_EMPTY_RESPONSE; Chrome itself retries a
+  # dropped request once), later ones switch the tenant.
+  get "/flaky-switch/:id" do
+    key = {__MODULE__, :flaky, id}
+
+    if :persistent_term.get(key, 0) >= 3 do
+      conn |> put_resp_cookie("tenant", id) |> redirect("/reports")
+    else
+      :persistent_term.put(key, :persistent_term.get(key, 0) + 1)
+      {_adapter, %{transport: %{socket: socket}}} = conn.adapter
+      ThousandIsland.Socket.close(socket)
+      Process.exit(self(), :kill)
+      conn
+    end
+  end
+
   get "/reports" do
     cond do
       not logged_in?(conn) ->

@@ -548,6 +548,21 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert png?(ctx.dir)
     end
 
+    test "a transient empty response on the post-login path is retried, not a failure", ctx do
+      route = %{path: "/reports", entry: %{wait_for: %{"selector" => "#reports"}}}
+      id = "flaky#{System.unique_integer([:positive])}"
+
+      login =
+        @login
+        |> Map.put("post_login_path", "/flaky-switch/{{persona.tenant_id}}")
+        |> put_in(["personas", "admin", "tenant_id"], id)
+
+      assert {:ok, %{text: _}} =
+               real(ctx, Map.merge(route, %{login: login, ctx: tree_ctx(ctx.dir)}))
+
+      assert png?(ctx.dir)
+    end
+
     test "correct credentials reach the route and shoot it", ctx do
       assert {:ok, %{text: _}} = real(ctx, %{})
       assert png?(ctx.dir)
