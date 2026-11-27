@@ -160,12 +160,12 @@ struct Shared {
 
 impl Shared {
     fn publish(&self, next: State) {
+        // Hold the subscriber lock across the state change so a subscriber
+        // that joins after observing `next` never also receives `next`.
+        let mut subscribers = self.subscribers.lock().unwrap();
         *self.state.lock().unwrap() = next.clone();
         self.changed.notify_all();
-        self.subscribers
-            .lock()
-            .unwrap()
-            .retain(|s| s.send(next.clone()).is_ok());
+        subscribers.retain(|s| s.send(next.clone()).is_ok());
     }
 }
 
