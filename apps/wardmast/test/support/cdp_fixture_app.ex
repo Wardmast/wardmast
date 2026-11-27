@@ -134,6 +134,14 @@ defmodule Wardmast.Test.CdpFixtureApp do
     end
   end
 
+  # A route that never answers: every request is dropped (ERR_EMPTY_RESPONSE), on every retry.
+  get "/always-drop" do
+    {_adapter, %{transport: %{socket: socket}}} = conn.adapter
+    ThousandIsland.Socket.close(socket)
+    Process.exit(self(), :kill)
+    conn
+  end
+
   get "/reports" do
     cond do
       not logged_in?(conn) ->

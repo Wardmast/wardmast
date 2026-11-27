@@ -576,6 +576,15 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert png?(ctx.dir)
     end
 
+    test "a shot whose navigation is dropped on every attempt reports the request size on the first line (bd-b2e1ev)",
+         ctx do
+      assert {:error, {:shot, msg}} = real(ctx, %{path: "/always-drop"})
+      [first | _] = String.split(msg, "\n")
+      assert first =~ "ERR_EMPTY_RESPONSE"
+      assert first =~ "(after 4 attempts)"
+      assert first =~ ~r/\[request: url \d+ bytes, \d+ cookies = \d+ bytes of Cookie header\]/
+    end
+
     test "correct credentials reach the route and shoot it", ctx do
       assert {:ok, %{text: _}} = real(ctx, %{})
       assert png?(ctx.dir)

@@ -427,6 +427,17 @@ defmodule Wardmast.Screenshots.CaptureTest do
       assert recorded(dir)["failure"]["server_log"] =~ "host probe GET /switch-tenant/x"
     end
 
+    test "a transport failure whose probe gives no answer still records that, never nothing", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      ctx = %{shoot_error: {:shot, "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/"}}
+
+      assert {:error, _} = run(dir, plan, ctx)
+      assert recorded(dir)["failure"]["server_log"] =~ "host probe unavailable"
+    end
+
     test "a failure that is not a transport error is not probed", %{tmp_dir: dir} do
       plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
       ctx = %{shoot_error: {:shot, "selector #edit not found"}}

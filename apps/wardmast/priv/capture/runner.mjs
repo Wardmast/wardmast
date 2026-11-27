@@ -54,7 +54,7 @@ function emit(result) {
 const firstLine = (err) =>
   String((err && err.message) || err)
     .split("\n")[0]
-    .slice(0, 300)
+    .slice(0, 500)
 
 // ── success detection ────────────────────────────────────────────────────
 
@@ -125,13 +125,22 @@ async function navigate(page, url, opts) {
       return await page.goto(url, opts)
     } catch (err) {
       if (attempt >= NAV_ATTEMPTS || !TRANSIENT_NET.test(String(err && err.message))) {
-        if (attempt > 1) err.message = `${err.message} (after ${attempt} attempts)`
-        if (TRANSIENT_NET.test(String(err && err.message))) err.message += await requestSize(page, url)
+        // The runner reports only the FIRST line of an error (`firstLine`), and Playwright's message
+        // continues with a "Call log": a note appended at the end would never reach capture.json.
+        let note = attempt > 1 ? ` (after ${attempt} attempts)` : ""
+        if (TRANSIENT_NET.test(String(err && err.message))) note += await requestSize(page, url)
+        if (note) err.message = withFirstLineNote(err.message, note)
         throw err
       }
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
     }
   }
+}
+
+function withFirstLineNote(message, note) {
+  const text = String(message)
+  const nl = text.indexOf("\n")
+  return nl < 0 ? text + note : text.slice(0, nl) + note + text.slice(nl)
 }
 
 // bd-b2e1ev: a server that closes a connection without answering (and without logging) may be
