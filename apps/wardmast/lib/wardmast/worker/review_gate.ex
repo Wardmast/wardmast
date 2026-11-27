@@ -602,7 +602,7 @@ defmodule Wardmast.Worker.ReviewGate do
   def register_gate(task_id) when is_binary(task_id) do
     others =
       for {pid, _} <- Registry.lookup(Wardmast.Worker.GateRegistry, task_id),
-          pid != self(),
+          pid != self() and Process.alive?(pid),
           do: pid
 
     {:ok, _} = Registry.register(Wardmast.Worker.GateRegistry, task_id, nil)
