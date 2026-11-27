@@ -1900,6 +1900,46 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # bd-a9q2sp review round 2: the authorless gate's cover marker must not stand in for a
+    # held fix round's. A restart at this point would otherwise restore a `reviewing` pass
+    # and re-run a review, losing the CI-red fix round.
+    test "a re-armed wait that reads red and then holds the fix round (cap 0) marks it revising+held",
+         ctx do
+      on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
+      rig = rig(ctx, "feature/ci-a9-red-held")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(
+                   revise_command: [@revise_commit],
+                   rounds: 3,
+                   local_capacity_retry_ms: 25
+                 )
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      set_pipeline(forge, [:failed, :running, :failed])
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end, 20_000)
+      assert :sys.get_state(gate).phase == :revising
+      assert remote_head(ctx, rig) == rig.head
+
+      assert %{"phase" => "revising", "held" => true} =
+               Wardmast.Worker.ReviewPass.stored(Ash.get!(Issue, rig.task.id))
+
+      stop_gate(gate)
+    end
+
     # bd-a9q2sp, finding "follow the production boot sequence": the tests above call
     # `rearm_ci_wait/2` themselves. These run the real boot sweep (`Boot.ReconcileSweep.steps/1`)
     # over the real `Workers.Reconciler`, in production order, against a ticket whose author's run

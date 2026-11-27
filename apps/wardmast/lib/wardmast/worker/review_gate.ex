@@ -2537,7 +2537,11 @@ defmodule Wardmast.Worker.ReviewGate do
       |> Map.put(:held, true)
 
     safe(fn -> ReviewPass.put(state.task_id, marker) end)
-    %{state | pass_marked?: true, held_marked?: true}
+    # `held_marked?` stays false on purpose: this marker is the reviewer's cover, not a
+    # held fix round's. If the round that follows is a held fix round (red CI, no
+    # capacity), `hold_marker/1` must still write its own `:revising` marker over it,
+    # or a restart would restore a review pass and lose the fix round.
+    %{state | pass_marked?: true}
   end
 
   defp hold_authorless_round(state), do: state
