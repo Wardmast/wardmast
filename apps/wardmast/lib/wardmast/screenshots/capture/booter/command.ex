@@ -110,6 +110,25 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   def log_tail(_spec, _handle), do: nil
 
   @impl true
+  def diagnose(_spec, %{base_url: base, reach: reach}, path) when is_binary(path) do
+    url = String.trim_trailing(base, "/") <> path
+
+    opts =
+      [retry: false, redirect: false, receive_timeout: 3_000, request_timeout: 5_000] ++
+        [into: &status_only/2] ++ reach
+
+    case Req.get(url, opts) do
+      {:ok, resp} ->
+        "host probe GET #{path} straight to the app (through the sandbox relay): status #{resp.status}"
+
+      {:error, exception} ->
+        "host probe GET #{path} straight to the app (through the sandbox relay): #{Exception.message(exception)}"
+    end
+  end
+
+  def diagnose(_spec, _handle, _path), do: nil
+
+  @impl true
   def stop(_spec, %{process: process} = handle) do
     AppProcess.stop(process)
 
@@ -266,6 +285,8 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
                process: process,
                sandbox: run.sandbox,
                exposed: exposed,
+               base_url: base_url,
+               reach: run.sandbox.reach(exposed),
                ready_url: base_url <> (cfg.ready["path"] || "/"),
                expect: cfg.ready["expect"] || "below_500"
              },
