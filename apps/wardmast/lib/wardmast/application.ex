@@ -152,6 +152,10 @@ defmodule Wardmast.Application do
         # until a grok worker asks for a token.
         Wardmast.Grok.CredentialBroker,
         {Registry, keys: :unique, name: Wardmast.Worker.Registry},
+        # bd-a9q2sp: every live ReviewGate registers under its task id (`:duplicate` — a second
+        # gate is recorded and warned about, not refused), so two gates sharing one worktree
+        # show up in the log instead of as an unexplained push race.
+        {Registry, keys: :duplicate, name: Wardmast.Worker.GateRegistry},
         # bd-9fgg04: live agent work that runs outside Wardmast.Worker.Supervisor
         # (a dispatch still provisioning, a PR review/reply shelling out to the
         # agent CLI) registers here for its duration — see Wardmast.Board.Drain.

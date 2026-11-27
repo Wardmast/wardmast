@@ -32,6 +32,43 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   alias Wardmast.Worker.ReviewGate
   alias Wardmast.Worker.VisualBaselines
 
+  # The real Reconciler for the boot sweep's data steps; process-killing sweeps are no-ops and
+  # the resume reports instead of starting a session (see `boot_sweep!/1`).
+  defmodule BootReconciler do
+    @moduledoc false
+    alias Wardmast.Workers.Reconciler
+
+    def sweep_worker_process_groups(_), do: {:ok, 0}
+    def sweep_worker_scopes(_), do: {:ok, 0}
+    defdelegate reconcile_orphaned_runs(opts), to: Reconciler
+    defdelegate reconcile_shutdown_casualties(opts), to: Reconciler
+    defdelegate reconcile_review_passes(opts), to: Reconciler
+    defdelegate reconcile_held_resumes(opts), to: Reconciler
+    defdelegate restarted_ids(results), to: Reconciler
+    defdelegate reconcile_open_pr_tasks(opts), to: Reconciler
+
+    def reconcile_ci_waits(opts) do
+      rearm_opts = Process.get(:boot_rearm_opts, [])
+
+      Reconciler.reconcile_ci_waits(
+        Keyword.put(opts, :rearm_fun, fn issue ->
+          Wardmast.Worker.ReviewGate.rearm_ci_wait(issue.id, rearm_opts)
+        end)
+      )
+    end
+
+    def reconcile_resumable_tasks(opts) do
+      test_pid = Process.get(:boot_test_pid)
+
+      Reconciler.reconcile_resumable_tasks(
+        Keyword.put(opts, :resume_fun, fn issue ->
+          send(test_pid, {:resume_attempt, issue.id})
+          {:ok, :stubbed}
+        end)
+      )
+    end
+  end
+
   @probe Path.expand("../../fixtures/review_ci_probe.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @echo_done Path.expand("../../fixtures/echo_with_done.sh", __DIR__)
@@ -1705,6 +1742,105 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # bd-a9q2sp (emr-474wu2 / emr-5kb4kx): production re-armed the wait at boot, the wait POLLED
+    # (21-28 times) and then read green; nothing continued. The tests above all see CI on the
+    # re-armed gate's first read; this one leaves the wait through the poll timer.
+    test "a re-armed wait that polls and then reads green dispatches the reviewer (interrupted run)",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-green")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert Worker.whereis(rig.task.id) == nil
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
+      stop_gate(gate)
+    end
+
+    test "a re-armed wait of a LATER round (4) that polls then reads green dispatches the reviewer",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-r4")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      issue = Ash.get!(Issue, rig.task.id)
+      marker = Map.put(issue.review_gate_state["ci_wait"], "round", 4)
+      :ok = Wardmast.Worker.ReviewCi.put_marker(rig.task.id, marker)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts(rounds: 4))
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "a re-armed gate in its screenshot step (CI left green) is not a crashed run", ctx do
+      rig = rig(ctx, "feature/ci-a9-shots")
+
+      {:ok, _} =
+        Ash.update(ctx.ws, %{
+          config:
+            Map.put(ctx.ws.config, "worker", %{
+              "repos" => %{
+                "trib/repo" => %{
+                  "screenshots" => %{"ui_paths" => ["**/*.txt"], "start_cmd" => "true"}
+                }
+              }
+            })
+        })
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+      me = self()
+
+      capture = fn _input, _opts ->
+        send(me, {:capturing, self()})
+        receive do: (:release -> {:error, :released})
+      end
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(rig.task.id, gate_opts(screenshot_capture: capture))
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      set_pipeline(forge, [:success])
+      assert_receive {:capturing, _}, 20_000
+
+      # The attention sweep's read, two minutes after CI went green (past the 60s orphan grace):
+      # the gate is working (its capture is in flight), so the ticket is not "crashed".
+      issue = Ash.get!(Issue, rig.task.id)
+      later = DateTime.add(DateTime.utc_now(), 120)
+
+      causes =
+        [issues: [issue], now: later]
+        |> Wardmast.Tasks.Attention.items()
+        |> Enum.map(& &1.attention.cause)
+
+      refute :run_crashed in causes,
+             "the gate is mid-screenshot (#{inspect(issue.review_gate_state)}); nothing marks the ticket"
+
+      stop_gate(gate)
+    end
+
     test "CI red on the head takes the existing red path (rerun, then the fix round)", ctx do
       rig = rig(ctx, "feature/ci-16")
 
@@ -1728,6 +1864,143 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       assert length(StubMerger.ci_reruns()) == 1
       assert reviewed_head(rig) == fixed
       assert Worker.whereis(rig.task.id) == nil
+      stop_gate(gate)
+    end
+
+    test "a re-armed wait that polls and then reads red takes the fix round (interrupted run)",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(revise_command: [@revise_commit], rounds: 3)
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      stop_gate(gate)
+    end
+
+    # bd-a9q2sp review round 2: the authorless gate's cover marker must not stand in for a
+    # held fix round's. A restart at this point would otherwise restore a `reviewing` pass
+    # and re-run a review, losing the CI-red fix round.
+    test "a re-armed wait that reads red and then holds the fix round (cap 0) marks it revising+held",
+         ctx do
+      on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
+      rig = rig(ctx, "feature/ci-a9-red-held")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(
+                   revise_command: [@revise_commit],
+                   rounds: 3,
+                   local_capacity_retry_ms: 25
+                 )
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
+      set_pipeline(forge, [:failed, :running, :failed])
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end, 20_000)
+      assert :sys.get_state(gate).phase == :revising
+      assert remote_head(ctx, rig) == rig.head
+
+      assert %{"phase" => "revising", "held" => true} =
+               Wardmast.Worker.ReviewPass.stored(Ash.get!(Issue, rig.task.id))
+
+      stop_gate(gate)
+    end
+
+    # bd-a9q2sp, finding "follow the production boot sequence": the tests above call
+    # `rearm_ci_wait/2` themselves. These run the real boot sweep (`Boot.ReconcileSweep.steps/1`)
+    # over the real `Workers.Reconciler`, in production order, against a ticket whose author's run
+    # the shutdown recorded `interrupted` — so the CI-wait re-arm, the review-pass sweep, the held
+    # -resume sweep, the open-PR sweep and the resume sweep all look at the ticket, and a resume
+    # that is not skipped would show up as a `:resume` message.
+    test "boot sweep, CI polls then reads green: one gate, no resume, the reviewer is dispatched",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-boot-green")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      boot_sweep!()
+      refute_received {:resume_attempt, _}
+      assert [gate] = live_gates(rig)
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert [^gate] = live_gates(rig)
+      refute_received {:resume_attempt, _}
+      assert Worker.whereis(rig.task.id) == nil
+      assert implement_runs(rig) == 1
+      refute_crashed(rig)
+      stop_gate(gate)
+    end
+
+    test "boot sweep, CI polls then reads red: one gate, no resume, the fix round runs", ctx do
+      rig = rig(ctx, "feature/ci-a9-boot-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      boot_sweep!(revise_command: [@revise_commit], rounds: 3)
+      refute_received {:resume_attempt, _}
+      assert [gate] = live_gates(rig)
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      refute_received {:resume_attempt, _}
+      refute_crashed(rig)
       stop_gate(gate)
     end
 
@@ -1948,6 +2221,21 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   # Wait on CI under a real gate, then kill the gate and its author outright —
   # no terminate/2, so nothing clears the ticket's marker: what a deploy leaves.
   # The head is also recorded on the PR the way the author's hand-off does.
+  # What the node's shutdown leaves behind (`Worker.terminate/2`): the author's run is
+  # `finished` / `interrupted`, "server shutdown".
+  defp interrupt_implement_runs(rig) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^rig.task.id and kind == :implement)
+    |> Ash.read!()
+    |> Enum.each(fn run ->
+      Ash.update!(run, %{
+        state: :finished,
+        outcome: :interrupted,
+        failure_reason: "server shutdown"
+      })
+    end)
+  end
+
   defp restart_during_wait(ctx, rig) do
     :ok = Wardmast.Tasks.PullRequest.record_review_gate(rig.task.id, %{pr_ref: @pr})
     gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
@@ -1961,6 +2249,49 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
     # The registry drops the killed author asynchronously; a restart starts empty.
     wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
+  end
+
+  # The boot sweep (`Boot.ReconcileSweep.steps/1`) over the real Reconciler, as `Application`
+  # runs it after a deploy. Only what would kill processes or start a real session is swapped
+  # (`BootReconciler`): the process-group and scope sweeps, and the resume itself, which reports
+  # `{:resume_attempt, id}` to the test. The CI-wait re-arm is the real sweep's, handed the
+  # test's stub forge and reviewer argv.
+  defp boot_sweep!(gate_extra \\ []) do
+    Process.put(:boot_rearm_opts, gate_opts(gate_extra))
+    Process.put(:boot_test_pid, self())
+
+    Wardmast.Boot.ReconcileSweep.steps(
+      primary?: true,
+      reconciler: __MODULE__.BootReconciler,
+      recovery: fn _ -> {:ok, %{}} end
+    )
+  end
+
+  # The ReviewGate processes alive for the ticket (there must be exactly one).
+  defp live_gates(rig) do
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_, pid, :worker, [ReviewGate]} when is_pid(pid) ->
+        if :sys.get_state(pid).task_id == rig.task.id, do: [pid], else: []
+
+      _ ->
+        []
+    end)
+  end
+
+  # The attention sweep's read two minutes on (past the 60s orphan grace).
+  defp refute_crashed(rig) do
+    issue = Ash.get!(Issue, rig.task.id)
+    later = DateTime.add(DateTime.utc_now(), 120)
+
+    causes =
+      [issues: [issue], now: later]
+      |> Wardmast.Tasks.Attention.items()
+      |> Enum.map(& &1.attention.cause)
+
+    refute :run_crashed in causes,
+           "nothing is working the ticket yet it reads crashed (#{inspect(issue.review_gate_state)})"
   end
 
   defp lines(log, needle),
