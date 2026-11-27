@@ -785,6 +785,21 @@ defmodule Wardmast.Workers.ReconcilerTest do
     assert escalation.subject =~ "cannot be safely resumed"
   end
 
+  test "a resume candidate whose worker is already active is skipped with no escalation" do
+    ws = create_workspace()
+    _issue = create_issue(ws.id, %{state: :active})
+
+    for run <- [%{state: :waiting, waiting_on: :review_gate}, %{state: :working}] do
+      resume = fn %Issue{} -> {:error, {:worker_active, run}} end
+
+      assert {:ok, %{resumed: 0, deferred: 0, escalated: 0, not_restarted: not_restarted}} =
+               Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+      assert [%{reason: :already_active}] = not_restarted
+      assert Message.inbox("admiral", workspace_id: ws.id) == []
+    end
+  end
+
   test "resume sweep respects the worker_live? guard (never resumes a live bead)" do
     ws = create_workspace()
     issue = create_issue(ws.id, %{state: :active})
