@@ -1012,15 +1012,14 @@ defmodule Wardmast.Quota do
   end
 
   # bd-a2zrh0: ask the `claude` CLI itself for usage over the stream-json
-  # control channel (`get_usage`), pointed at the very config dir the HTTP poll
-  # would have read a token from. The CLI refreshes its own access token as it
-  # goes, so this does not depend on an interactive session keeping the login
-  # alive. It is only ever *tried*: any failure — channel disabled, CLI too old
+  # control channel (`get_usage`) — only for the operator's own `~/.claude`
+  # login (`:operator_credentials_file`), which the CLI refreshes as it goes. It
+  # is only ever *tried*: any failure — channel disabled, CLI too old
   # or silent, request unsupported, an error answer, a body with no usage
   # windows — returns `:fallback` and the HTTP poll below runs unchanged, so
   # its 401/429 handling, cooldown and paging are all still the source of truth.
-  # An explicit `:token` or a stored account token has no config dir to point
-  # the CLI at, so those never go through the channel.
+  # An explicit `:token`, a stored account token and a quota grant (bd-6y4pj6:
+  # `GrantRefresher` is its sole refresher) never go through the channel.
   defp control_channel_usage(fetch_opts, token_source) do
     with {:ok, env} <- control_channel_env(token_source),
          true <- ControlChannel.enabled?(),
@@ -1062,8 +1061,13 @@ defmodule Wardmast.Quota do
     Logger.info("Quota: control-channel usage unavailable, using HTTP: #{inspect(other)}")
   end
 
-  defp control_channel_env({:quota_grant, path}),
-    do: {:ok, [{"CLAUDE_CONFIG_DIR", GrantFile.config_dir(path)}]}
+  # bd-6y4pj6: never for a quota grant. A `claude` pointed at the grant's config
+  # dir refreshes (rotates) that file on its own, outside `GrantRefresher`'s
+  # lock; when that races the refresher's own CLI run, the loser's rejected
+  # refresh blanks the grant and the poll goes blind (the re-login that did not
+  # hold, 2026-11-27 02:07Z). `GrantRefresher` is the grant's only refresher;
+  # the poll just reads the access token it keeps fresh.
+  defp control_channel_env({:quota_grant, _path}), do: :none
 
   defp control_channel_env(:operator_credentials_file), do: {:ok, []}
   defp control_channel_env(_), do: :none
