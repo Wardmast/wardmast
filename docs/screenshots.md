@@ -373,6 +373,13 @@ Enforced today:
 * Only Arbiter uploads, using the merger's credential; the worker never holds it. Public
   repos fail closed (above). Public paste hosts and gists are never used.
 
+* **`login.ready_selector`** (optional, form login): a CSS selector the CDP shooter waits for on the
+  sign-in page before it fills the form, bounded by `login.timeout_ms` (default 10 s). Unset, a page
+  with `[data-phx-main]` (a LiveView) is awaited until `[data-phx-main].phx-connected`, because a
+  LiveView form is reset when its socket connects. A failed login reports the final URL path and the
+  visible flash/alert text (first line, at most 200 chars), and the `shot_failed` warning names the
+  side it failed on (`at the merge-base` or `at the head`).
+
 * **`fixture_check.marker`** (opt-in): `{path, contains}` and optionally `auth`. Before any
   shot the capture requires `marker.path` to answer `200` (no redirect away) with
   `marker.contains` in it. *How* it is checked depends on the `login`:

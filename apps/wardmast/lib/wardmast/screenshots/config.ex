@@ -631,6 +631,7 @@ defmodule Wardmast.Screenshots.Config do
     strings ++
       success(v["success"], label) ++
       post_login_path(v, label) ++
+      ready_selector(v, label) ++
       personas_form(v["personas"], label) ++
       default_persona(v, label, persona_names(v["personas"]))
   end
@@ -654,6 +655,16 @@ defmodule Wardmast.Screenshots.Config do
 
   defp login(%{} = _v, label), do: [~s(#{label}.kind must be "none", "form" or "cmd")]
   defp login(_v, label), do: ["#{label} must be a map"]
+
+  # `ready_selector`: a CSS selector the CDP shooter waits for on the sign-in page before it
+  # fills the form. Unset, a LiveView page (`[data-phx-main]`) is awaited until it is connected.
+  defp ready_selector(%{"ready_selector" => s}, label) do
+    if is_binary(s) and s != "",
+      do: [],
+      else: ["#{label}.ready_selector must be a non-empty string"]
+  end
+
+  defp ready_selector(_v, _label), do: []
 
   @success_keys ~w(path_not url_not_contains)
 

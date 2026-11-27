@@ -118,6 +118,26 @@ async function settle(page, ms = 3000) {
 
 // ── login ────────────────────────────────────────────────────────────────
 
+// The visible flash/alert text on the (PHI-free) sign-in page, for a failed login's reason: first
+// line only, capped at 200 chars. "" when there is none.
+async function visibleAlert(page) {
+  try {
+    const text = await page.evaluate(() => {
+      const sel = '[role="alert"], .alert, [id^="flash"], [class*="flash"], [data-flash]'
+      for (const el of document.querySelectorAll(sel)) {
+        const r = el.getBoundingClientRect()
+        const t = (el.innerText || "").trim()
+        if (r.width > 0 && r.height > 0 && t !== "") return t
+      }
+      return ""
+    })
+    const line = String(text).split(/\r?\n/)[0].trim().slice(0, 200)
+    return line === "" ? "" : `; the page says ${JSON.stringify(line)}`
+  } catch {
+    return ""
+  }
+}
+
 async function doLogin(page, spec, timeoutMs) {
   const login = spec.login
   if (login.kind !== "form") {
@@ -140,6 +160,28 @@ async function doLogin(page, spec, timeoutMs) {
   }
 
   const step = clamp(login.timeout_ms, 1000, 30000, 10000)
+
+  // A LiveView sign-in form is reset when its socket connects, so a fill made before that is
+  // lost and a click before it can be swallowed. Wait for the configured ready_selector, or,
+  // when the page is a LiveView, for its main view to be connected.
+  const configured = typeof login.ready_selector === "string" && login.ready_selector !== ""
+  const readySelector = configured
+    ? login.ready_selector
+    : (await page.$("[data-phx-main]")) !== null
+      ? "[data-phx-main].phx-connected"
+      : null
+  if (readySelector !== null) {
+    try {
+      await page.waitForSelector(readySelector, { state: "attached", timeout: step })
+    } catch {
+      throw fail(
+        `login: the page never became ready within ${step} ms: ` +
+          `${configured ? "login.ready_selector" : "LiveView socket"} ${JSON.stringify(readySelector)} ` +
+          `did not appear on ${where(page.url())}`
+      )
+    }
+  }
+
   const fillField = async (selector, value, what) => {
     try {
       await page.locator(selector).fill(value, { timeout: STEP_TIMEOUT_MS })
@@ -159,9 +201,11 @@ async function doLogin(page, spec, timeoutMs) {
   try {
     await page.waitForURL((u) => ok(u.toString()), { timeout: step, waitUntil: "commit" })
   } catch {
+    await page.waitForLoadState("load", { timeout: 2000 }).catch(() => {})
     throw fail(
       `login as ${JSON.stringify(login.persona)} did not succeed: still on ${where(page.url())} ` +
-        `${step} ms after submitting (login.success: ${describeSuccess(login.success)})`
+        `${step} ms after submitting (login.success: ${describeSuccess(login.success)})` +
+        (await visibleAlert(page))
     )
   }
   // The redirect chain must come to rest somewhere that still counts as logged in.
@@ -169,7 +213,8 @@ async function doLogin(page, spec, timeoutMs) {
   if (!ok(page.url())) {
     throw fail(
       `login as ${JSON.stringify(login.persona)} did not succeed: ended on ${where(page.url())} ` +
-        `(login.success: ${describeSuccess(login.success)})`
+        `(login.success: ${describeSuccess(login.success)})` +
+        (await visibleAlert(page))
     )
   }
 

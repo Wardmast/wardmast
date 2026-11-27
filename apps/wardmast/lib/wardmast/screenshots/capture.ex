@@ -752,7 +752,9 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   defp shot_failure({:shot, detail}, role, entry, _path) do
-    Failure.new(:shot_failed, "#{entry.id}: #{detail_text(detail)}",
+    Failure.new(
+      :shot_failed,
+      "#{entry.id}: #{detail_text(detail)} (at the #{describe_role(role)})",
       role: role,
       shot: entry.id,
       detail: detail_text(detail)

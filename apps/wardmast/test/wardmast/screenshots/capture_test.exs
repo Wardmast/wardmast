@@ -345,6 +345,8 @@ defmodule Wardmast.Screenshots.CaptureTest do
 
       assert failure.code == :shot_failed
       assert failure.message =~ "#edit"
+      # the warning names which side (before = merge-base) failed
+      assert failure.message =~ "(at the merge-base)"
     end
 
     test "a shot failure records the tail of the app's server output for that side", %{

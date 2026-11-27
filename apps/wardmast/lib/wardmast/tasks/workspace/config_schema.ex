@@ -706,7 +706,9 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          preview.ready_path/ready_timeout
                         login            {kind "none"|"form"|"cmd", default_persona,
                                          personas, ...}: form takes path, username_selector,
-                                         password_selector, submit_selector, success and a
+                                         password_selector, submit_selector, ready_selector
+                                         (optional; awaited before filling, default the
+                                         LiveView socket), success and a
                                          personas map of FIXTURE credentials; cmd takes cmd
                                          (may use {{persona}}) and a personas name list.
                                          success = {path_not: "/login"} (the browser left

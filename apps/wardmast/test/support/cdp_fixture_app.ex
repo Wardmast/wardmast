@@ -40,10 +40,35 @@ defmodule Wardmast.Test.CdpFixtureApp do
   get "/login" do
     html(conn, """
     <h1 id="title">Sign in</h1>
+    #{if conn.query_string == "error=1", do: ~s(<div role="alert">Invalid email or password<br>second line</div>), else: ""}
     <form method="post" action="/login#{if conn.query_string == "stay=1", do: "?stay=1", else: ""}">
       <input id="email" name="email"><input id="password" name="password" type="password">
       <button id="go">Sign in</button>
     </form>
+    """)
+  end
+
+  # A LiveView-style sign-in: the socket "connects" 600 ms after load, wiping whatever was typed
+  # and only then adding `phx-connected`; a submit before that is swallowed.
+  get "/lv-login" do
+    html(conn, """
+    <h1 id="title">Sign in</h1>
+    <div data-phx-main id="main">
+    <form id="lvform" method="post" action="/login">
+      <input id="email" name="email"><input id="password" name="password" type="password">
+      <button id="go">Sign in</button>
+    </form></div>
+    <script>
+      var connected = false;
+      document.getElementById('lvform').addEventListener('submit', function (e) {
+        if (!connected) e.preventDefault();
+      });
+      setTimeout(function () {
+        document.getElementById('lvform').reset();
+        connected = true;
+        document.getElementById('main').classList.add('phx-connected');
+      }, 600);
+    </script>
     """)
   end
 
@@ -57,7 +82,7 @@ defmodule Wardmast.Test.CdpFixtureApp do
         |> redirect(if stay, do: "/login?ok=1", else: "/home")
 
       _ ->
-        redirect(conn, "/login")
+        redirect(conn, "/login?error=1")
     end
   end
 
