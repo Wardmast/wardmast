@@ -662,29 +662,38 @@ defmodule Wardmast.Screenshots.Capture do
     }
 
     try do
-      case call_shooter(st.shooter, shot) do
-        :ok ->
-          # No page text reported: nothing was scanned, so nothing is trusted.
-          scanned(st, :unscanned, out_file, name, role, entry)
-
-        {:ok, %{text: texts}} when is_list(texts) ->
-          scanned(st, texts, out_file, name, role, entry)
-
-        {:error, {:http_status, 404}} ->
-          {:ok, :absent}
-
-        {:error, {:redirected, requested, final}} ->
-          {:ok, {:ok, %{status: :redirected, requested: requested, final: final}}}
-
-        {:error, {:fixture_marker, reason}} ->
-          {:error, marker_failure(role, reason)}
-
-        {:error, reason} ->
-          failure = shot_failure(reason, role, entry, path)
-          {:error, %{failure | server_log: server_log(st, spec, target)}}
-      end
+      st.shooter
+      |> call_shooter(shot)
+      |> shot_outcome(st, spec, target, {out_file, name, role, entry, path})
     after
       File.rm_rf(scratch)
+    end
+  end
+
+  defp shot_outcome(:ok, st, _spec, _target, {out_file, name, role, entry, _path}) do
+    # No page text reported: nothing was scanned, so nothing is trusted.
+    scanned(st, :unscanned, out_file, name, role, entry)
+  end
+
+  defp shot_outcome({:ok, %{text: texts}}, st, _spec, _target, {out_file, name, role, entry, _})
+       when is_list(texts) do
+    scanned(st, texts, out_file, name, role, entry)
+  end
+
+  defp shot_outcome({:error, reason}, st, spec, target, {_out, _name, role, entry, path}) do
+    case reason do
+      {:http_status, 404} ->
+        {:ok, :absent}
+
+      {:redirected, requested, final} ->
+        {:ok, {:ok, %{status: :redirected, requested: requested, final: final}}}
+
+      {:fixture_marker, reason} ->
+        {:error, marker_failure(role, reason)}
+
+      reason ->
+        failure = shot_failure(reason, role, entry, path)
+        {:error, %{failure | server_log: server_log(st, spec, target)}}
     end
   end
 

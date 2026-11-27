@@ -351,19 +351,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       %{"ok" => true} ->
         collect(shot, spec.out_file, text_file)
 
-      %{"ok" => false, "kind" => "fixture_marker"} = answer ->
-        status = if is_integer(answer["status"]), do: answer["status"]
-        {:error, {:fixture_marker, marker_reason(spec, answer["problem"], status)}}
-
-      %{"ok" => false, "kind" => "redirected", "requested" => from, "final" => to}
-      when is_binary(from) and is_binary(to) ->
-        {:error, {:redirected, from, to}}
-
-      %{"ok" => false, "kind" => "http_status", "status" => status} when is_integer(status) ->
-        {:error, {:http_status, status}}
-
       %{"ok" => false} = answer ->
-        {:error, {:shot, to_string(answer["reason"] || "the capture runner failed")}}
+        failed_answer(answer, spec)
 
       nil when code == 0 ->
         {:error, {:shot, "the capture runner gave no answer: #{Chromium.tail(out)}"}}
@@ -371,6 +360,25 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       nil ->
         {:error, {:shot, "the capture runner exited with status #{code}: #{Chromium.tail(out)}"}}
     end
+  end
+
+  defp failed_answer(%{"kind" => "fixture_marker"} = answer, spec) do
+    status = if is_integer(answer["status"]), do: answer["status"]
+    {:error, {:fixture_marker, marker_reason(spec, answer["problem"], status)}}
+  end
+
+  defp failed_answer(%{"kind" => "redirected", "requested" => from, "final" => to}, _spec)
+       when is_binary(from) and is_binary(to) do
+    {:error, {:redirected, from, to}}
+  end
+
+  defp failed_answer(%{"kind" => "http_status", "status" => status}, _spec)
+       when is_integer(status) do
+    {:error, {:http_status, status}}
+  end
+
+  defp failed_answer(answer, _spec) do
+    {:error, {:shot, to_string(answer["reason"] || "the capture runner failed")}}
   end
 
   defp answer(out) do
