@@ -376,9 +376,28 @@ defmodule Wardmast.Reviews.PushState do
         end
 
       {:error, out} ->
-        {:error, classify_rejection(out), state}
+        recheck_after_failed_push(path, branch, state, opts, classify_rejection(out))
     end
   end
+
+  # bd-a9q2sp (emr-5kb4kx): a push can fail because the same head landed through another
+  # route a moment before (the worker's own pre-push check pushing at the same time: a lock
+  # on the ref, a lost race). The `:ahead` reading was taken before that, so refusing on it
+  # parks a ticket whose branch is on the remote. Ask the remote once more, this time after
+  # the attempt; only a head that is positively there is let through. This is a read, not a
+  # second push, so the guard's one-attempt bound (`G18`) stands. A refusal that is not a
+  # race (`{:needs_operator_push, _}`) is never second-guessed.
+  defp recheck_after_failed_push(path, branch, state, opts, :push_failed) do
+    after_attempt = inspect_branch(path, branch, opts)
+
+    case verdict(after_attempt) do
+      :pushed -> {:ok, :pushed, after_attempt}
+      _ -> {:error, :push_failed, state}
+    end
+  end
+
+  defp recheck_after_failed_push(_path, _branch, state, _opts, reason),
+    do: {:error, reason, state}
 
   @workflow_refusal ~r/without `workflows` permission/
   @workflow_path ~r/workflow `([^`]+)`/

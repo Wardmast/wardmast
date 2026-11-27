@@ -605,6 +605,35 @@ defmodule Wardmast.Reviews.PushStateTest do
 
       assert {:error, :push_failed, _state} = PushState.ensure_pushed(repo, b)
     end
+
+    # bd-a9q2sp, case B (emr-5kb4kx 10:37:24.985 "refusing to review an unpushed head (ahead,
+    # :push_failed)", then 10:37:25.106 "pushed ... before round 2"): the head was `:ahead` at the
+    # check, another push of the same commit (the worker's own pre-push check) landed while this
+    # one ran, and this one failed. The remote carries the head: it is pushed, not unpushed.
+    test "a push that fails because the same head landed meanwhile is pushed, not refused",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/raced")
+      git!(["push", "-q", "-u", "origin", b], repo)
+      local = commit(repo, "fix.txt")
+
+      hook = Path.join([repo, ".git", "hooks", "pre-push"])
+
+      File.write!(hook, """
+      #!/bin/sh
+      unset GIT_DIR
+      git -C #{repo} push --no-verify -q origin HEAD:refs/heads/#{b}
+      echo "error: cannot lock ref: the other push holds it" >&2
+      exit 1
+      """)
+
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, :pushed, state} = PushState.ensure_pushed(repo, b)
+      assert state.status == :in_sync
+      assert state.remote_head == local
+      assert remote_sha(tmp, b) == local
+    end
   end
 
   describe "ssh_remote/1" do
