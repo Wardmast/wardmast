@@ -50,6 +50,15 @@ defmodule Wardmast.Quota.GrantRefresher do
   authentication: sessions use the account's setup token
   (`Wardmast.Sessions.AccountCredentials`), never a copy of it.
 
+  That includes the poll itself: `Wardmast.Quota` reads the grant's access
+  token over HTTP and does **not** spawn a `claude` control channel against the
+  grant's config dir. It used to (bd-a2zrh0), and that CLI refreshed the same
+  file outside the lock. A rotation racing this refresher's own CLI run is
+  rejected and the CLI blanks the grant (`refreshToken` empty, `expiresAt`
+  null); that is the most likely cause of the re-login that did not hold, 32h
+  after it (2026-11-27 02:07Z, `{:cli_exit, 1}`). Any new `claude` run against this config dir must go
+  through `refresh/3`'s lock or not exist.
+
   ## Neutral cwd
 
   The CLI runs from `:cwd` (default `<scratch_root>/quota-grant-refresh`) —

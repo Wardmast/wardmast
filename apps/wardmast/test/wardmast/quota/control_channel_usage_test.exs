@@ -1,8 +1,9 @@
 defmodule Wardmast.Quota.ControlChannelUsageTest do
   @moduledoc """
-  bd-a2zrh0: `Wardmast.Quota.capture_oauth_usage/2` reads usage over the Claude
-  control channel (`get_usage`) when it can, and uses the HTTP `/api/oauth/usage`
-  poll — exactly as before — whenever the channel cannot answer.
+  bd-a2zrh0 / bd-6y4pj6: `Wardmast.Quota.capture_oauth_usage/2` on an account
+  with a quota grant (`:cli_credentials_path`) polls `/api/oauth/usage` over HTTP
+  with the grant file's access token and never spawns `claude` against the
+  grant's config dir: `Wardmast.Quota.GrantRefresher` is its only refresher.
   """
   use Wardmast.DataCase, async: false
 
@@ -67,45 +68,20 @@ defmodule Wardmast.Quota.ControlChannelUsageTest do
     )
   end
 
-  test "usage is read from get_usage, in the grant config dir, with no HTTP call", ctx do
-    assert {:ok, snapshot} = capture(ctx, "ok")
-
-    # The stub's five_hour utilization is 42.0 (a 0-100 percentage).
-    assert_in_delta snapshot.utilization_5h, 0.42, 0.001
-    refute_received {:http_usage, _}
-    assert ctx.seen |> File.read!() |> String.trim() == ctx.grant_dir
-  end
-
-  for mode <- ~w(cli_2_1_317 statusline_shape) do
-    test "#{mode}: the shape claude 2.1.317 answers with is consumed, with no HTTP call", ctx do
-      assert {:ok, snapshot} = capture(ctx, unquote(mode))
-      assert_in_delta snapshot.utilization_5h, 0.42, 0.01
-      refute_received {:http_usage, _}
-    end
-  end
-
-  test "using the channel is logged at info; a fallback says why, at info", ctx do
-    previous = Logger.level()
-    Logger.configure(level: :info)
-    on_exit(fn -> Logger.configure(level: previous) end)
-
-    used = ExUnit.CaptureLog.capture_log([level: :info], fn -> capture(ctx, "cli_2_1_317") end)
-    assert used =~ "usage read via control channel"
-
-    fell_back =
-      ExUnit.CaptureLog.capture_log([level: :info], fn -> capture(ctx, "usage_empty") end)
-
-    assert fell_back =~ "control-channel usage unavailable"
-    assert fell_back =~ "no_windows"
-  end
-
-  for mode <- ~w(no_usage init_unsupported exit usage_empty usage_429 usage_hang) do
-    test "control channel answering #{mode} falls back to the HTTP poll", ctx do
+  # bd-6y4pj6: the grant is refreshed by exactly one process, `GrantRefresher`.
+  # A `claude` spawned here against the grant's config dir refreshes (and, when
+  # its rotation races the refresher's, blanks) that same file; that is what
+  # re-blinded the quota poll ~32h after a re-login. So a poll on a quota grant
+  # reads the file's access token over HTTP and never spawns the CLI, whatever
+  # the channel could have answered.
+  for mode <- ~w(ok cli_2_1_317 statusline_shape no_usage exit usage_hang) do
+    test "#{mode}: a quota-grant poll never spawns the CLI, it reads the grant over HTTP", ctx do
       assert {:ok, snapshot} = capture(ctx, unquote(mode), timeout_ms: 300)
 
       assert_received {:http_usage, ["Bearer grant-token"]}
       # The HTTP stub's five_hour utilization is 77, not the control stub's 42.
       assert_in_delta snapshot.utilization_5h, 0.77, 0.001
+      refute File.exists?(ctx.seen)
     end
   end
 
