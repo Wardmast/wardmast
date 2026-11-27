@@ -961,7 +961,12 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   @doc "The reviewer/PR text for a side whose route redirected (paths only)."
-  @spec redirect_text(%{requested: String.t(), final: String.t()}) :: String.t()
+  @spec redirect_text(%{
+          :requested => String.t(),
+          :final => String.t(),
+          optional(atom()) => term()
+        }) ::
+          String.t()
   def redirect_text(%{requested: requested, final: final}),
     do: "route #{requested} redirected to #{final}; no screenshot"
 
