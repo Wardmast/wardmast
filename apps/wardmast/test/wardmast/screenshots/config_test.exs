@@ -754,6 +754,30 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert warning =~ "no fixture_check"
     end
 
+    test "fixture_check.marker.auth is an optional boolean" do
+      marker = fn extra ->
+        %{
+          "fixture_check" => %{"marker" => Map.merge(%{"path" => "/p", "contains" => "x"}, extra)}
+        }
+      end
+
+      assert Config.validate(Map.merge(@minimal, marker.(%{})), "s") == []
+      assert Config.validate(Map.merge(@minimal, marker.(%{"auth" => false})), "s") == []
+      assert Config.validate(Map.merge(@minimal, marker.(%{"auth" => true})), "s") == []
+      assert [_] = Config.validate(Map.merge(@minimal, marker.(%{"auth" => "no"})), "s")
+    end
+
+    test "marker_in_session?/1: a login puts the marker check in the logged-in browser" do
+      form = %{"kind" => "form"}
+      marker = %{"marker" => %{"path" => "/p", "contains" => "x"}}
+      off = %{"marker" => Map.put(marker["marker"], "auth", false)}
+
+      assert Config.marker_in_session?(%Config{login: form, fixture_check: marker})
+      refute Config.marker_in_session?(%Config{login: form, fixture_check: off})
+      refute Config.marker_in_session?(%Config{login: %{"kind" => "none"}, fixture_check: marker})
+      refute Config.marker_in_session?(%Config{login: form, fixture_check: nil})
+    end
+
     test "a workspace with no repos has nothing to flag" do
       assert Config.safety_overview(ws(%{})) == []
       assert Config.safety_overview(nil) == []

@@ -17,10 +17,17 @@ defmodule Wardmast.Screenshots.Capture.Shooter do
   A route that does not exist returns `{:error, {:http_status, 404}}`; the capture step reads that
   as "absent at this commit" (a new or removed route). Any other status is a route error. Anything
   else that goes wrong is `{:error, {:shot, detail}}`.
+
+  A shooter that checks `config.fixture_check.marker` inside its logged-in browser session
+  (`Config.marker_in_session?/1`, bd-ckriya) returns `{:error, {:fixture_marker, reason}}` when the
+  marker is not there, **before** it takes the shot; the capture step reads that as the
+  `:fixture_marker_mismatch` failure, so nothing is shot. `reason` names the path and the problem
+  and never any page content.
   """
 
   @callback shoot(map()) ::
               :ok
               | {:ok, %{required(:text) => [String.t()]}}
-              | {:error, {:http_status, integer()} | {:shot, term()}}
+              | {:error,
+                 {:http_status, integer()} | {:shot, term()} | {:fixture_marker, String.t()}}
 end

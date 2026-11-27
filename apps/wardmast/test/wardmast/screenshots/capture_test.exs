@@ -766,6 +766,79 @@ defmodule Wardmast.Screenshots.CaptureTest do
       refute File.read!(Path.join([dir, "out", "capture.json"])) =~ "SECRET-BODY"
     end
 
+    @login %{
+      "kind" => "form",
+      "path" => "/login",
+      "username_selector" => "#u",
+      "password_selector" => "#p",
+      "submit_selector" => "#go",
+      "default_persona" => "a",
+      "personas" => %{"a" => %{"username" => "a", "password" => "b"}}
+    }
+
+    # /patients-style marker: gated behind the login, so an anonymous GET can never pass it.
+    defp gated_config(extra \\ %{}),
+      do: %{
+        @config
+        | login: @login,
+          fixture_check: %{
+            "marker" => Map.merge(%{"path" => "/patients", "contains" => "Jordan Ellis"}, extra)
+          }
+      }
+
+    test "with a login the anonymous probe does not run: the shooter's session checks it", %{
+      tmp_dir: dir,
+      base_url: base_url
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      # The marker plug answers 404 to /patients: were the anonymous probe made, it would fail.
+      assert {:ok, _} = run(dir, plan, %{base_url: base_url}, config: gated_config())
+      assert_received {:shoot, "before", _, _, _}
+    end
+
+    test "a login config with marker.auth false still probes anonymously", %{
+      tmp_dir: dir,
+      base_url: base_url
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:error, failure} =
+               run(dir, plan, %{base_url: base_url}, config: gated_config(%{"auth" => false}))
+
+      assert failure.code == :fixture_marker_mismatch
+      refute_received {:shoot, _, _, _, _}
+    end
+
+    test "a marker the logged-in shooter rejects blocks every shot, without page content", %{
+      tmp_dir: dir,
+      base_url: base_url
+    } do
+      plan =
+        write_plan!(dir, [%{"id" => "home", "path" => "/"}, %{"id" => "other", "path" => "/"}])
+
+      reason = "fixture_check: GET /patients after login answered 302, not 200 with the marker"
+
+      assert {:error, failure} =
+               run(dir, plan, %{base_url: base_url, shoot_error: {:fixture_marker, reason}},
+                 config: gated_config()
+               )
+
+      assert failure.code == :fixture_marker_mismatch
+      assert failure.role == "before"
+      assert failure.message =~ "nothing was shot"
+      assert failure.message =~ "/patients"
+      refute failure.message =~ "SECRET-BODY"
+      # the first shot's refusal stops the run: the second is never taken, and the app is stopped
+      assert_received {:shoot, "before", _, _, _}
+      refute_received {:shoot, _, _, _, _}
+      assert_received {:stop, "before", _}
+
+      recorded = recorded(dir)
+      assert recorded["state"] == "failed"
+      assert recorded["failure"]["code"] == "fixture_marker_mismatch"
+    end
+
     test "no fixture_check means no probe", %{tmp_dir: dir} do
       plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
       assert {:ok, _} = run(dir, plan)
