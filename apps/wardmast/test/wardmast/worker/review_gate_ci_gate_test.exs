@@ -1705,6 +1705,105 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # bd-a9q2sp (emr-474wu2 / emr-5kb4kx): production re-armed the wait at boot, the wait POLLED
+    # (21-28 times) and then read green; nothing continued. The tests above all see CI on the
+    # re-armed gate's first read; this one leaves the wait through the poll timer.
+    test "a re-armed wait that polls and then reads green dispatches the reviewer (interrupted run)",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-green")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert Worker.whereis(rig.task.id) == nil
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+
+      refute Projection.view(Ash.get!(Issue, rig.task.id)).attention in [
+               :run_crashed,
+               :worker_stopped
+             ]
+
+      stop_gate(gate)
+    end
+
+    test "a re-armed wait of a LATER round (4) that polls then reads green dispatches the reviewer",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-r4")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      issue = Ash.get!(Issue, rig.task.id)
+      marker = Map.put(issue.review_gate_state["ci_wait"], "round", 4)
+      :ok = Wardmast.Worker.ReviewCi.put_marker(rig.task.id, marker)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts(rounds: 4))
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "a re-armed gate in its screenshot step (CI left green) is not a crashed run", ctx do
+      rig = rig(ctx, "feature/ci-a9-shots")
+
+      {:ok, _} =
+        Ash.update(ctx.ws, %{
+          config:
+            Map.put(ctx.ws.config, "worker", %{
+              "repos" => %{
+                "trib/repo" => %{
+                  "screenshots" => %{"ui_paths" => ["**/*.txt"], "start_cmd" => "true"}
+                }
+              }
+            })
+        })
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+      me = self()
+
+      capture = fn _input, _opts ->
+        send(me, {:capturing, self()})
+        receive do: (:release -> {:error, :released})
+      end
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(rig.task.id, gate_opts(screenshot_capture: capture))
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      set_pipeline(forge, [:success])
+      assert_receive {:capturing, _}, 20_000
+
+      # The attention sweep's read, two minutes after CI went green (past the 60s orphan grace):
+      # the gate is working (its capture is in flight), so the ticket is not "crashed".
+      issue = Ash.get!(Issue, rig.task.id)
+      later = DateTime.add(DateTime.utc_now(), 120)
+
+      causes =
+        [issues: [issue], now: later]
+        |> Wardmast.Tasks.Attention.items()
+        |> Enum.map(& &1.attention.cause)
+
+      refute :run_crashed in causes,
+             "the gate is mid-screenshot (#{inspect(issue.review_gate_state)}); nothing marks the ticket"
+
+      stop_gate(gate)
+    end
+
     test "CI red on the head takes the existing red path (rerun, then the fix round)", ctx do
       rig = rig(ctx, "feature/ci-16")
 
@@ -1726,6 +1825,39 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       fixed = remote_head(ctx, rig)
       refute fixed == rig.head
       assert length(StubMerger.ci_reruns()) == 1
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      stop_gate(gate)
+    end
+
+    test "a re-armed wait that polls and then reads red takes the fix round (interrupted run)",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(revise_command: [@revise_commit], rounds: 3)
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
       assert reviewed_head(rig) == fixed
       assert Worker.whereis(rig.task.id) == nil
       stop_gate(gate)
@@ -1948,6 +2080,21 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   # Wait on CI under a real gate, then kill the gate and its author outright —
   # no terminate/2, so nothing clears the ticket's marker: what a deploy leaves.
   # The head is also recorded on the PR the way the author's hand-off does.
+  # What the node's shutdown leaves behind (`Worker.terminate/2`): the author's run is
+  # `finished` / `interrupted`, "server shutdown".
+  defp interrupt_implement_runs(rig) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^rig.task.id and kind == :implement)
+    |> Ash.read!()
+    |> Enum.each(fn run ->
+      Ash.update!(run, %{
+        state: :finished,
+        outcome: :interrupted,
+        failure_reason: "server shutdown"
+      })
+    end)
+  end
+
   defp restart_during_wait(ctx, rig) do
     :ok = Wardmast.Tasks.PullRequest.record_review_gate(rig.task.id, %{pr_ref: @pr})
     gate = start_gate(rig, ctx, command: [@probe, "HOLD"])

@@ -2474,6 +2474,7 @@ defmodule Wardmast.Worker.ReviewGate do
   defp tell_author(_state, _msg), do: :ok
 
   defp ci_end_wait(%{ci_wait: nil, ci_rearmed: true} = state) do
+    state = hold_authorless_round(state)
     ReviewCi.put_marker(state.task_id, nil)
     %{state | ci_rearmed: false, phase: :reviewing}
   end
@@ -2481,10 +2482,33 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_end_wait(%{ci_wait: nil} = state), do: %{state | phase: :reviewing}
 
   defp ci_end_wait(state) do
+    state = hold_authorless_round(state)
     ReviewCi.put_marker(state.task_id, nil)
     tell_author(state, {:__review_gate_ci_wait__, false})
     %{state | ci_wait: nil, phase: :reviewing}
   end
+
+  # bd-a9q2sp (emr-474wu2 / emr-5kb4kx): a gate with no author — re-armed at boot
+  # (`rearm_ci_wait/2`) or started authorless — is the only thing working the ticket,
+  # and the `ci_wait` marker the board and `Lifecycle.View` read it by dies with the
+  # wait. Between that moment and the reviewer's own `pass` marker (`mark_pass/3`) the
+  # gate does real work with no run behind it (the screenshot capture, the checkout, a
+  # reviewer held for capacity), so a ticket whose author's run ended `interrupted`
+  # read as `run_crashed` once the orphan grace passed and the attention sweep ticked,
+  # and was resumed by hand. Cover that stretch with the `pass` marker a held round
+  # gets (`hold_marker/1`), written BEFORE the `ci_wait` one is cleared so the ticket
+  # is never uncovered. `mark_pass/3` replaces it with the running reviewer's.
+  defp hold_authorless_round(%{author: nil, pass_marked?: false} = state) do
+    marker =
+      state
+      |> ReviewPass.marker(:reviewing, state.review_id, state.timeout_ms)
+      |> Map.put(:held, true)
+
+    safe(fn -> ReviewPass.put(state.task_id, marker) end)
+    %{state | pass_marked?: true, held_marked?: true}
+  end
+
+  defp hold_authorless_round(state), do: state
 
   # The review checkout is cut from origin AFTER CI was read. If the branch moved
   # in between, CI did not vouch for what the reviewer is about to read: wait on
