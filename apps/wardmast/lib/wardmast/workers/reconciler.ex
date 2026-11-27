@@ -856,6 +856,15 @@ defmodule Wardmast.Workers.Reconciler do
 
             %{report | resumed: report.resumed + 1, restarted: report.restarted ++ [issue.id]}
 
+          # The task is already running (an operator or another path resumed
+          # it): resolved, not unresumable. No escalation, so no `run_crashed`.
+          {:error, {:worker_active, _run}} ->
+            Logger.info(
+              "Workers.Reconciler: task #{issue.id} already has an active worker — nothing to resume"
+            )
+
+            not_resumed(report, issue.id, :already_active)
+
           {:error, reason} ->
             Logger.warning(
               "Workers.Reconciler: cannot safely resume task #{issue.id} " <>
