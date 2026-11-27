@@ -594,6 +594,23 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp ci_wait_round(_issue), do: nil
 
+  @doc false
+  # Register the calling gate under `task_id` (`Wardmast.Worker.GateRegistry`, `:duplicate`) and
+  # return the pids of the gates ALREADY live for that ticket. A registry entry dies with its
+  # process, so a gate that stopped is never listed.
+  @spec register_gate(String.t()) :: [pid()]
+  def register_gate(task_id) when is_binary(task_id) do
+    others =
+      for {pid, _} <- Registry.lookup(Wardmast.Worker.GateRegistry, task_id),
+          pid != self() and Process.alive?(pid),
+          do: pid
+
+    {:ok, _} = Registry.register(Wardmast.Worker.GateRegistry, task_id, nil)
+    others
+  rescue
+    ArgumentError -> []
+  end
+
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -1046,6 +1063,21 @@ defmodule Wardmast.Worker.ReviewGate do
     # survives a restart, and the verdict goes to the ticket (`deliver_verdict/4`).
     author = Keyword.get(opts, :author)
     task_id = Keyword.fetch!(opts, :task_id)
+
+    # bd-a9q2sp (emr-5kb4kx): the gates of one ticket share a worktree and push the same
+    # branch; a second live one is never intended, so it is named when it starts.
+    case register_gate(task_id) do
+      [] ->
+        :ok
+
+      others ->
+        Logger.warning(
+          "ReviewGate: task=#{task_id} already has #{length(others)} live gate(s) " <>
+            "(#{Enum.map_join(others, ", ", &inspect/1)}); this one (round " <>
+            "#{Keyword.get(opts, :round, 1)}, #{if author, do: "with", else: "no"} author, " <>
+            "rearmed=#{Keyword.get(opts, :rearmed, false)}) pushes the same branch"
+        )
+    end
 
     state = %{
       author: author,
@@ -2474,6 +2506,7 @@ defmodule Wardmast.Worker.ReviewGate do
   defp tell_author(_state, _msg), do: :ok
 
   defp ci_end_wait(%{ci_wait: nil, ci_rearmed: true} = state) do
+    state = hold_authorless_round(state)
     ReviewCi.put_marker(state.task_id, nil)
     %{state | ci_rearmed: false, phase: :reviewing}
   end
@@ -2481,10 +2514,37 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_end_wait(%{ci_wait: nil} = state), do: %{state | phase: :reviewing}
 
   defp ci_end_wait(state) do
+    state = hold_authorless_round(state)
     ReviewCi.put_marker(state.task_id, nil)
     tell_author(state, {:__review_gate_ci_wait__, false})
     %{state | ci_wait: nil, phase: :reviewing}
   end
+
+  # bd-a9q2sp (emr-474wu2 / emr-5kb4kx): a gate with no author — re-armed at boot
+  # (`rearm_ci_wait/2`) or started authorless — is the only thing working the ticket,
+  # and the `ci_wait` marker the board and `Lifecycle.View` read it by dies with the
+  # wait. Between that moment and the reviewer's own `pass` marker (`mark_pass/3`) the
+  # gate does real work with no run behind it (the screenshot capture, the checkout, a
+  # reviewer held for capacity), so a ticket whose author's run ended `interrupted`
+  # read as `run_crashed` once the orphan grace passed and the attention sweep ticked,
+  # and was resumed by hand. Cover that stretch with the `pass` marker a held round
+  # gets (`hold_marker/1`), written BEFORE the `ci_wait` one is cleared so the ticket
+  # is never uncovered. `mark_pass/3` replaces it with the running reviewer's.
+  defp hold_authorless_round(%{author: nil, pass_marked?: false} = state) do
+    marker =
+      state
+      |> ReviewPass.marker(:reviewing, state.review_id, state.timeout_ms)
+      |> Map.put(:held, true)
+
+    safe(fn -> ReviewPass.put(state.task_id, marker) end)
+    # `held_marked?` stays false on purpose: this marker is the reviewer's cover, not a
+    # held fix round's. If the round that follows is a held fix round (red CI, no
+    # capacity), `hold_marker/1` must still write its own `:revising` marker over it,
+    # or a restart would restore a review pass and lose the fix round.
+    %{state | pass_marked?: true}
+  end
+
+  defp hold_authorless_round(state), do: state
 
   # The review checkout is cut from origin AFTER CI was read. If the branch moved
   # in between, CI did not vouch for what the reviewer is about to read: wait on

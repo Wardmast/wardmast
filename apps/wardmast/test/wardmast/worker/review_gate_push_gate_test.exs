@@ -317,6 +317,42 @@ defmodule Wardmast.Worker.ReviewGatePushGateTest do
     end
   end
 
+  # bd-a9q2sp, case B (emr-5kb4kx): the head is `:ahead` at the gate's check, the same head lands
+  # on origin by another route while the gate's own push runs, and that push fails. Local ==
+  # remote, so the ticket must not park `head_not_pushed`: the reviewer reads the pushed head.
+  describe "the head lands on origin during the gate's own push (bd-a9q2sp)" do
+    test "is reviewed, not parked :head_not_pushed", %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-race"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      local = commit_in(wt, "fix.txt", "the fix\n")
+
+      {hooks, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], wt)
+      hook = Path.join([String.trim(hooks), "hooks", "pre-push"])
+
+      File.write!(hook, """
+      #!/bin/sh
+      unset GIT_DIR
+      git -C #{wt} push --no-verify -q origin HEAD:refs/heads/#{branch}
+      echo "error: cannot lock ref: the other push holds it" >&2
+      exit 1
+      """)
+
+      File.chmod!(hook, 0o755)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == local end, 20_000)
+
+      refute ReviewPark.parked?(Ash.get!(Issue, task.id))
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == local
+    end
+  end
+
   describe "a push GitHub refuses for the missing `workflows` permission" do
     defp reject_origin_pushes(tmp, message) do
       hook = Path.join([tmp, "origin.git", "hooks", "pre-receive"])
@@ -966,6 +1002,41 @@ defmodule Wardmast.Worker.ReviewGatePushGateTest do
       assert body =~ "is pushed"
       assert body =~ "merge it by hand"
       refute body =~ "Do NOT merge by hand"
+    end
+  end
+
+  # bd-a9q2sp (emr-5kb4kx): `push_gate/4` logged a refusal and a success 120ms apart for ONE
+  # ticket, which only two live gates can produce (each caller of the gate parks or stops after a
+  # refusal). A second gate is not refused (a resumed author legitimately starts one), but it is
+  # now named.
+  describe "gates of one ticket (bd-a9q2sp)" do
+    test "a gate registers under its task id and sees the gates already live" do
+      parent = self()
+
+      gate = fn id, task_id ->
+        spawn_link(fn ->
+          send(parent, {id, ReviewGate.register_gate(task_id)})
+          receive do: (:stop -> :ok)
+        end)
+      end
+
+      first = gate.(:first, "rg-dup-1")
+      assert_receive {:first, []}
+      second = gate.(:second, "rg-dup-1")
+      assert_receive {:second, [^first]}
+      other = gate.(:other, "rg-dup-2")
+      assert_receive {:other, []}
+
+      for pid <- [first, second, other] do
+        ref = Process.monitor(pid)
+        send(pid, :stop)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      end
+
+      # A stopped gate's entry dies with it: the next gate of the ticket starts alone.
+      last = gate.(:last, "rg-dup-1")
+      assert_receive {:last, []}
+      send(last, :stop)
     end
   end
 end
