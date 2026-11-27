@@ -66,6 +66,42 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
     end
   end
 
+  # bd-ckriya: the fixture marker is checked here, inside the logged-in session, because its path
+  # is normally behind the login (an anonymous GET is only a redirect to sign-in). The runner does
+  # it after `login` and `login.post_login_path` and before the shot's own navigation, in the same
+  # browser context, and answers with a problem *code*; the reason is worded below, from the
+  # configured path and the status alone, so no page content can reach it.
+  defp marker_spec(%{config: %Config{} = config}, login) when is_map(login) do
+    with true <- Config.marker_in_session?(config),
+         %{"path" => path, "contains" => needle} <- config.fixture_check["marker"] do
+      %{"path" => path, "contains" => needle}
+    else
+      _ -> nil
+    end
+  end
+
+  defp marker_spec(_spec, _login), do: nil
+
+  defp marker_reason(spec, problem, status) do
+    path = get_in(spec.config.fixture_check, ["marker", "path"])
+    prefix = "fixture_check: GET #{path} after login"
+
+    case problem do
+      "status" ->
+        "#{prefix} answered #{status}, not 200 with the fixture marker"
+
+      "failed" ->
+        "#{prefix} could not be loaded, so the fixture marker could not be checked"
+
+      "redirected" ->
+        "#{prefix} was redirected away from #{path}, so the fixture marker was not shown"
+
+      _ ->
+        "#{prefix} did not contain the configured fixture marker, so the app may be running " <>
+          "on real data"
+    end
+  end
+
   @doc """
   `:ok` when the runner could run here (`node`, the runner file and `playwright-core`, and a
   Chromium), else `{:error, reason}`. `ctx` is the shot's `ctx` (see the moduledoc).
@@ -123,7 +159,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         "full_page" => entry.full_page,
         "hide" => entry.hide
       },
-      "login" => login
+      "login" => login,
+      "fixture_marker" => marker_spec(spec, login)
     }
   end
 
@@ -276,7 +313,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         {exec, args} = Chromium.with_timeout(env ++ boxed, spec.timeout_s * 2 + 10)
 
         {out, code} = ReleaseEnv.cmd(exec, args, stderr_to_stdout: true)
-        interpret(out, code, shot, spec.out_file, text)
+        interpret(out, code, shot, spec, text)
       end
     after
       File.rm_rf(dir)
@@ -305,10 +342,14 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   # The runner's answer is the last line of output that is a JSON object with an `ok` key. No such
   # line is never a success, whatever the exit status.
-  defp interpret(out, code, shot, out_file, text_file) do
+  defp interpret(out, code, shot, spec, text_file) do
     case answer(out) do
       %{"ok" => true} ->
-        collect(shot, out_file, text_file)
+        collect(shot, spec.out_file, text_file)
+
+      %{"ok" => false, "kind" => "fixture_marker"} = answer ->
+        status = if is_integer(answer["status"]), do: answer["status"]
+        {:error, {:fixture_marker, marker_reason(spec, answer["problem"], status)}}
 
       %{"ok" => false, "kind" => "http_status", "status" => status} when is_integer(status) ->
         {:error, {:http_status, status}}

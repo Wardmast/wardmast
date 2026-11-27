@@ -725,7 +725,11 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         themes           map name -> {color_scheme, local_storage, query};
                                          defaults light and dark
                         default_themes   default ["light"]
-                        fixture_check    {marker: {path, contains}} proving fixture data
+                        fixture_check    {marker: {path, contains, auth?}} proving fixture
+                                         data before any shot: with a login it is checked in
+                                         the logged-in browser (after login/post_login_path,
+                                         final 200 on the path, no redirect away); without
+                                         one, or with auth: false, by an anonymous GET
                         deny_patterns    extra regexes for the DOM text scan
                         fixture_email_domains  default example.com/.org/.net, test, invalid,
                                          localhost

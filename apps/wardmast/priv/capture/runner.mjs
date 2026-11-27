@@ -11,6 +11,9 @@
 //                                                            page's text (JSON) at spec.text_file
 //   {"ok":false,"kind":"http_status","status":404}           the route answered >= 400
 //   {"ok":false,"kind":"shot","reason":"..."}                anything else (login, a step, ...)
+//   {"ok":false,"kind":"fixture_marker","problem":"status|redirected|missing|failed"}
+//                                                            the fixture marker was not shown in the
+//                                                            logged-in session; nothing was shot
 //
 // and the exit status is 0 whenever an answer was printed. This runs headless Chromium
 // (`spec.chrome`) over CDP through playwright-core, one fresh browser context per shot, so a shot
@@ -186,6 +189,48 @@ async function doLogin(page, spec, timeoutMs) {
   }
 }
 
+// ── fixture marker ───────────────────────────────────────────────────────
+
+// bd-ckriya: `fixture_check.marker` checked in THIS logged-in session, after the login and its
+// post-login path and before the shot's own navigation, so a marker path behind the login (an
+// anonymous GET only ever bounces to sign-in) can be verified. Nothing is shot if it fails. The
+// answer carries a problem CODE (`status` / `redirected` / `missing` / `failed`) and the status,
+// never the page's content or the needle: the host words the reason from the configured path.
+async function checkFixtureMarker(page, spec, timeoutMs) {
+  const marker = spec.fixture_marker
+  if (!marker) return
+  const problem = (code, extra = {}) =>
+    new ShotError("fixture_marker", `fixture marker ${marker.path}: ${code}`, {
+      problem: code,
+      ...extra
+    })
+
+  let resp
+  try {
+    resp = await page.goto(spec.base_url + marker.path, { waitUntil: "load", timeout: timeoutMs })
+  } catch {
+    throw problem("failed")
+  }
+  if (!resp || resp.status() !== 200) throw problem("status", { status: resp ? resp.status() : 0 })
+
+  const trim = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p)
+  const wanted = trim(new URL(spec.base_url + marker.path).pathname)
+  if (trim(new URL(page.url()).pathname) !== wanted) throw problem("redirected")
+
+  // A LiveView page renders its content once connected: give the text a moment to appear.
+  try {
+    await page.waitForFunction(
+      (needle) =>
+        ((document.body && document.body.innerText) || "").includes(needle) ||
+        document.documentElement.outerHTML.includes(needle),
+      marker.contains,
+      { timeout: Math.min(timeoutMs, 5000) }
+    )
+  } catch {
+    throw problem("missing")
+  }
+}
+
 // ── steps ────────────────────────────────────────────────────────────────
 
 async function runStep(page, spec, step, theme) {
@@ -317,6 +362,7 @@ async function shoot(spec) {
     page.setDefaultNavigationTimeout(spec.timeout_ms)
 
     if (spec.login) await doLogin(page, spec, spec.timeout_ms)
+    await checkFixtureMarker(page, spec, spec.timeout_ms)
 
     const resp = await page.goto(withQuery(spec.base_url, spec.path, theme.query), {
       waitUntil: "load",

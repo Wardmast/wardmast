@@ -373,11 +373,26 @@ Enforced today:
 * Only Arbiter uploads, using the merger's credential; the worker never holds it. Public
   repos fail closed (above). Public paste hosts and gists are never used.
 
-* **`fixture_check.marker`** (opt-in): after every boot, before any shot, the capture `GET`s
-  `marker.path` and requires a `200` whose body contains `marker.contains`. A mismatch aborts
-  the capture (`fixture_marker_mismatch`, naming the path, never the body), so an app that
-  reports it is not on fixture data is never shot. Have the app expose e.g. `/health` saying
-  `data: fixture` only when started on fixture data. `arb config overview` (and the MCP
+* **`fixture_check.marker`** (opt-in): `{path, contains}` and optionally `auth`. Before any
+  shot the capture requires `marker.path` to answer `200` (no redirect away) with
+  `marker.contains` in it. *How* it is checked depends on the `login`:
+  * **No `login`** (or `login.kind: "none"`, or `marker.auth: false`): after every boot the capture
+    makes an anonymous `GET` of `marker.path` and checks the body.
+  * **With a `login`** (the default for such configs): the marker path is normally behind that login,
+    where an anonymous `GET` only ever gets a redirect to sign-in, so it is checked **in the
+    logged-in browser session** the shooter uses: after the form login and `login.post_login_path`,
+    before the shot's own navigation, the runner opens `marker.path` and requires a final `200` on
+    that path (a redirect away fails) with `marker.contains` in the page's text or DOM. Each shot
+    has its own fresh browser context, so each shot (and each persona, `as`) checks the marker in
+    its own session; a persona that cannot open `marker.path` therefore cannot be shot, so pick a
+    path every persona can see. Set `"auth": false` to keep the anonymous probe for a public marker
+    such as `/health` even when a `login` is configured.
+
+  A mismatch aborts the capture (`fixture_marker_mismatch`, naming the path and the problem, such
+  as the status it answered, never the page content), and **nothing is shot**: in the logged-in
+  case the marker is checked before the shot's route is even opened. So an app that reports it is
+  not on fixture data is never shot. Have the app expose e.g. `/health` saying `data: fixture` (or
+  show a known fixture record on a page every persona can open) only when started on fixture data. `arb config overview` (and the MCP
   `workspace_config_overview`, `screenshots_safety`) flags a repo with no `fixture_check`.
 * **The DOM text scan** (always on): every shot reports the page's visible text, its `alt` /
   `title` attributes (and, with the CDP runner, placeholders and form-field values). Secret

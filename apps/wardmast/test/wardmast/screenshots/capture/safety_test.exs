@@ -133,5 +133,30 @@ defmodule Wardmast.Screenshots.Capture.SafetyTest do
       assert {:error, _} = Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
       assert {:error, _} = Safety.probe_marker(cfg, "http://127.0.0.1:1", [])
     end
+
+    @form_login %{
+      "kind" => "form",
+      "path" => "/login",
+      "username_selector" => "#u",
+      "password_selector" => "#p",
+      "submit_selector" => "#go",
+      "default_persona" => "a",
+      "personas" => %{"a" => %{"username" => "a", "password" => "b"}}
+    }
+
+    test "with a login the marker is checked in the logged-in browser, so this probe stands down" do
+      # Nothing listens on port 1: an anonymous request would be an error.
+      cfg = %{config(%{"path" => "/patients", "contains" => "x"}) | login: @form_login}
+      assert :ok == Safety.probe_marker(cfg, "http://127.0.0.1:1", [])
+    end
+
+    test "marker.auth false keeps the anonymous probe even with a login", %{port: port} do
+      marker = %{"path" => "/health", "contains" => "data: fixture", "auth" => false}
+      cfg = %{config(marker) | login: @form_login}
+      assert :ok == Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
+
+      miss = %{config(%{marker | "path" => "/missing"}) | login: @form_login}
+      assert {:error, _} = Safety.probe_marker(miss, "http://127.0.0.1:#{port}", [])
+    end
   end
 end

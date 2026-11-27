@@ -972,6 +972,16 @@ time a repo's `.env` is lying around, so this is enforced in layers, from the st
    (the message names the path, never the body; the app is still stopped). `arb config overview` /
    MCP `workspace_config_overview` (`screenshots_safety`) flag a repo without `fixture_check`. The
    probe sits at the boot, not before every shot: one boot serves one group of shots.
+   **With a `login` (bd-ckriya):** the marker path is normally behind it, and an anonymous `GET`
+   only ever answers a redirect to sign-in, so `probe_marker/3` stands down
+   (`Config.marker_in_session?/1`) and the CDP runner checks the marker in its own logged-in
+   session instead: after the login and `post_login_path`, before the shot's own navigation, it
+   opens `marker.path`, requires a final `200` on that path (a redirect away fails) and the
+   string in the page's text or DOM. Each shot's runner (a fresh context) does so, so nothing is
+   ever shot unchecked. The runner answers a problem code (`status` / `redirected` / `missing`
+   / `failed`) and the status only, and `Shooter.Cdp` words the reason from the configured path,
+   so no page content reaches it; the capture step maps `{:error, {:fixture_marker, reason}}` to
+   the same `:fixture_marker_mismatch`. `marker.auth: false` keeps the anonymous probe.
 5. **DOM text scan with withholding (the backstop).** Every shot also records the page's
    visible text (`innerText`) and `<img alt>`/`title` attributes, which are scanned
    **before the image leaves the pod** with:

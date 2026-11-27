@@ -154,6 +154,23 @@ defmodule Wardmast.Screenshots.Config do
 
   def safety_overview(_workspace), do: []
 
+  @doc """
+  Whether `fixture_check.marker` is checked inside the shooter's logged-in browser session (after
+  `login` and `login.post_login_path`, before the shot) rather than by the anonymous
+  `Capture.Safety.probe_marker/3`: when there is a `fixture_check`, a `login` other than
+  `"none"`, and the marker does not opt out with `"auth": false`. A marker path behind the login
+  can never pass an anonymous request (it is redirected to sign-in).
+  """
+  @spec marker_in_session?(t()) :: boolean()
+  def marker_in_session?(%__MODULE__{fixture_check: %{"marker" => %{} = marker}, login: login}) do
+    Map.get(marker, "auth") != false and login_kind(login) not in [nil, "none"]
+  end
+
+  def marker_in_session?(_config), do: false
+
+  defp login_kind(%{"kind" => kind}), do: kind
+  defp login_kind(_login), do: nil
+
   @doc "The keys a `screenshots` block may carry."
 
   @spec keys() :: [String.t()]
@@ -782,16 +799,28 @@ defmodule Wardmast.Screenshots.Config do
       ]
   end
 
-  defp fixture_check(%{"marker" => %{"path" => p, "contains" => c}}, _label)
-       when is_binary(p) and is_binary(c) and c != "",
-       do:
-         if(String.starts_with?(p, "/"),
-           do: [],
-           else: ["fixture_check.marker.path must start with /"]
-         )
+  defp fixture_check(%{"marker" => %{"path" => p, "contains" => c} = marker}, _label)
+       when is_binary(p) and is_binary(c) and c != "" do
+    Enum.reject(
+      [
+        if(String.starts_with?(p, "/"),
+          do: nil,
+          else: "fixture_check.marker.path must start with /"
+        ),
+        if(is_boolean(Map.get(marker, "auth", true)),
+          do: nil,
+          else: "fixture_check.marker.auth must be true or false"
+        )
+      ],
+      &is_nil/1
+    )
+  end
 
   defp fixture_check(_v, label),
-    do: ["#{label} must be {\"marker\": {\"path\": \"/..\", \"contains\": \"..\"}}"]
+    do: [
+      "#{label} must be {\"marker\": {\"path\": \"/..\", \"contains\": \"..\"}} " <>
+        "(optionally \"auth\": false to probe without logging in)"
+    ]
 
   defp deny_patterns(v, label) when is_list(v) do
     Enum.flat_map(v, fn

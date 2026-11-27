@@ -31,6 +31,8 @@ defmodule Wardmast.Screenshots.Capture.Safety do
   (fail closed). It does not see pixels; it is a backstop, not a redaction.
   """
 
+  alias Wardmast.Screenshots.Config
+
   @max_text_bytes 1_000_000
   @max_marker_bytes 65_536
 
@@ -164,17 +166,29 @@ defmodule Wardmast.Screenshots.Capture.Safety do
   end
 
   @doc """
-  Probe `config.fixture_check.marker` on the booted app at `base_url`. `reach` is the sandbox's
-  `reach/1` options for the app (Req options). `:ok` when there is no `fixture_check` or the marker
-  answers `200` with a body containing the string; otherwise `{:error, reason}`, where `reason`
-  names the path and the problem and never the body.
+  Probe `config.fixture_check.marker` on the booted app at `base_url` with an anonymous `GET`.
+  `reach` is the sandbox's `reach/1` options for the app (Req options). `:ok` when there is no
+  `fixture_check` or the marker answers `200` with a body containing the string; otherwise
+  `{:error, reason}`, where `reason` names the path and the problem and never the body.
+
+  A config with a `login` (and no `marker.auth: false`) is not probed here: its marker path is
+  normally behind that login, where an anonymous request is only ever a redirect to sign-in, so
+  the marker is checked in the shooter's logged-in browser session instead (`Config.marker_in_session?/1`,
+  `Shooter.Cdp`), after login and before the shot. That check has the same semantics: nothing is
+  shot on a miss, and the reason never contains page content.
   """
   @spec probe_marker(map(), String.t(), keyword()) :: :ok | {:error, String.t()}
-  def probe_marker(
-        %{fixture_check: %{"marker" => %{"path" => path, "contains" => needle}}},
-        base_url,
-        reach
-      ) do
+  def probe_marker(%Config{} = config, base_url, reach) do
+    if Config.marker_in_session?(config), do: :ok, else: probe_anonymous(config, base_url, reach)
+  end
+
+  def probe_marker(config, base_url, reach), do: probe_anonymous(config, base_url, reach)
+
+  defp probe_anonymous(
+         %{fixture_check: %{"marker" => %{"path" => path, "contains" => needle}}},
+         base_url,
+         reach
+       ) do
     url = base_url <> path
 
     opts =
@@ -198,7 +212,7 @@ defmodule Wardmast.Screenshots.Capture.Safety do
     end
   end
 
-  def probe_marker(_config, _base_url, _reach), do: :ok
+  defp probe_anonymous(_config, _base_url, _reach), do: :ok
 
   # Bounded: an untrusted app's body is never read past a small cap, and the marker is looked for
   # in what was read.

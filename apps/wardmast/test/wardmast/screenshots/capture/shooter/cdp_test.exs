@@ -166,6 +166,33 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert msg =~ "persona.password"
     end
 
+    defp marker_shot(dir, marker, login \\ @login, overrides \\ %{}) do
+      config = struct!(Config, login: login, fixture_check: %{"marker" => marker})
+      shot(dir, Map.merge(%{config: config, login: login}, overrides))
+    end
+
+    test "with a login the fixture marker rides in the spec, to be checked after login", %{
+      tmp_dir: dir
+    } do
+      marker = %{"path" => "/patients", "contains" => "Jordan Ellis"}
+      spec = Cdp.build_spec(marker_shot(dir, marker), "/c")
+      assert spec["fixture_marker"] == %{"path" => "/patients", "contains" => "Jordan Ellis"}
+    end
+
+    test "no marker in the spec without a login, without a marker, or with auth: false", %{
+      tmp_dir: dir
+    } do
+      marker = %{"path" => "/patients", "contains" => "Jordan Ellis"}
+
+      none = Cdp.build_spec(marker_shot(dir, marker, %{"kind" => "none"}), "/c")
+      assert none["fixture_marker"] == nil
+
+      off = Cdp.build_spec(marker_shot(dir, Map.put(marker, "auth", false)), "/c")
+      assert off["fixture_marker"] == nil
+
+      assert Cdp.build_spec(shot(dir), "/c")["fixture_marker"] == nil
+    end
+
     test "no login block when the config has none", %{tmp_dir: dir} do
       spec = Cdp.build_spec(shot(dir, %{login: %{"kind" => "none"}}), "/c")
       assert spec["login"] == nil
@@ -395,6 +422,48 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
                )
     end
 
+    test "a fixture marker failure is its own error, worded here and never from the page", %{
+      tmp_dir: dir
+    } do
+      marker = %{"path" => "/patients", "contains" => "Jordan Ellis"}
+
+      node =
+        fake_node(
+          dir,
+          ~s({"ok":false,"kind":"fixture_marker","problem":"status","status":302,"reason":"SECRET-BODY"}),
+          0
+        )
+
+      ctx = %{node: node, chrome: "/bin/sh"}
+
+      assert {:error, {:fixture_marker, reason}} =
+               Cdp.shoot(marker_shot(dir, marker, @login, %{ctx: ctx}))
+
+      assert reason =~ "fixture_check"
+      assert reason =~ "/patients"
+      assert reason =~ "302"
+      refute reason =~ "SECRET-BODY"
+      refute reason =~ "Jordan Ellis"
+
+      for problem <- ~w(redirected missing) do
+        node =
+          fake_node(
+            dir,
+            ~s({"ok":false,"kind":"fixture_marker","problem":"#{problem}","reason":"SECRET-BODY"}),
+            0
+          )
+
+        assert {:error, {:fixture_marker, reason}} =
+                 Cdp.shoot(
+                   marker_shot(dir, marker, @login, %{ctx: %{node: node, chrome: "/bin/sh"}})
+                 )
+
+        assert reason =~ "/patients"
+        refute reason =~ "SECRET-BODY"
+        refute reason =~ "Jordan Ellis"
+      end
+    end
+
     test "no answer at all is a shot error naming the exit status and output", %{tmp_dir: dir} do
       assert {:error, {:shot, msg}} = run_fake(dir, "Segmentation fault", 139)
       assert msg =~ "139"
@@ -534,6 +603,61 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       login = Map.put(@login, "username_selector", "#nope")
       assert {:error, {:shot, msg}} = real(ctx, %{login: login})
       assert msg =~ "#nope"
+    end
+
+    # The marker path is login-gated (/home bounces an anonymous request to /login), as tonic's
+    # /patients is: only the logged-in browser can see it.
+    defp real_marker(ctx, marker, overrides \\ %{}) do
+      config = struct!(Config, login: @login, fixture_check: %{"marker" => marker})
+      real(ctx, Map.merge(%{config: config}, overrides))
+    end
+
+    test "a login-gated marker passes once the browser is logged in, before the shot", ctx do
+      assert {:ok, %{text: _}} =
+               real_marker(ctx, %{"path" => "/home", "contains" => "Dashboard"})
+
+      assert png?(ctx.dir)
+    end
+
+    test "the marker is checked after post_login_path", ctx do
+      login =
+        @login
+        |> Map.put("post_login_path", "/switch-tenant/{{persona.tenant_id}}?return_to=%2Fhome")
+        |> put_in(["personas", "admin", "tenant_id"], "harbor")
+
+      config =
+        struct!(Config,
+          login: login,
+          fixture_check: %{
+            "marker" => %{"path" => "/reports", "contains" => "Reports for harbor"}
+          }
+        )
+
+      assert {:ok, %{text: _}} = real(ctx, %{login: login, config: config})
+    end
+
+    test "a marker missing after login blocks the shot and never names the page", ctx do
+      assert {:error, {:fixture_marker, reason}} =
+               real_marker(ctx, %{"path" => "/home", "contains" => "Not On This Page"})
+
+      assert reason =~ "/home"
+      refute reason =~ "Dashboard"
+      refute File.exists?(Path.join(ctx.dir, "shot.png"))
+    end
+
+    test "a marker path that redirects away after login blocks the shot", ctx do
+      assert {:error, {:fixture_marker, reason}} =
+               real_marker(ctx, %{"path" => "/expired", "contains" => "Sign in"})
+
+      assert reason =~ "/expired"
+      refute File.exists?(Path.join(ctx.dir, "shot.png"))
+    end
+
+    test "a marker path that errors blocks the shot", ctx do
+      assert {:error, {:fixture_marker, reason}} =
+               real_marker(ctx, %{"path" => "/boom", "contains" => "boom"})
+
+      assert reason =~ "500"
     end
 
     test "404 and 500 routes map to http_status", ctx do

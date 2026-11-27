@@ -477,7 +477,10 @@ defmodule Wardmast.Screenshots.Capture do
 
   # bd-995svb (design §9.4): with `fixture_check.marker` the app must say it runs on fixture data,
   # after every boot and before any shot. A mismatch aborts the boot; the failure names the path
-  # and never the body.
+  # and never the body. With a `login` the marker is not probed here (anonymously it could only
+  # be a redirect to sign-in): the shooter checks it in the logged-in session, after login and
+  # `post_login_path`, before the shot (bd-ckriya; see `Safety.probe_marker/3`), and its refusal
+  # arrives from `shoot_one/4` as the same `:fixture_marker_mismatch`.
   defp probe_fixture(st, spec, target) do
     reach = if target.app, do: st.sandbox.reach(target.app), else: []
 
@@ -486,14 +489,17 @@ defmodule Wardmast.Screenshots.Capture do
         :ok
 
       {:error, reason} ->
-        {:error,
-         Failure.new(
-           :fixture_marker_mismatch,
-           "the app at the #{describe_role(spec.role)} did not pass the fixture check, so " <>
-             "nothing was shot: #{reason}",
-           role: spec.role
-         )}
+        {:error, marker_failure(spec.role, reason)}
     end
+  end
+
+  defp marker_failure(role, reason) do
+    Failure.new(
+      :fixture_marker_mismatch,
+      "the app at the #{describe_role(role)} did not pass the fixture check, so " <>
+        "nothing was shot: #{reason}",
+      role: role
+    )
   end
 
   defp boot(st, spec) do
@@ -665,6 +671,9 @@ defmodule Wardmast.Screenshots.Capture do
 
         {:error, {:http_status, 404}} ->
           {:ok, :absent}
+
+        {:error, {:fixture_marker, reason}} ->
+          {:error, marker_failure(role, reason)}
 
         {:error, reason} ->
           failure = shot_failure(reason, role, entry, path)
