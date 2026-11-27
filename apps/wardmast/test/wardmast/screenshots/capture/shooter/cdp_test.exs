@@ -43,7 +43,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
         wait_for: nil,
         target: nil,
         full_page: false,
-        hide: []
+        hide: [],
+        allow_redirect: false
       },
       overrides
     )
@@ -380,6 +381,18 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       Cdp.shoot(shot(dir, %{ctx: %{node: fake_node(dir, out, code), chrome: "/bin/sh"}}))
     end
 
+    test "a redirected answer is {:redirected, requested, final}, paths only", %{tmp_dir: dir} do
+      out = ~s({"ok":false,"kind":"redirected","requested":"/home","final":"/dashboard"})
+      assert {:error, {:redirected, "/home", "/dashboard"}} = run_fake(dir, out)
+    end
+
+    test "the shot's allow_redirect reaches the runner spec", %{tmp_dir: dir} do
+      spec = Cdp.build_spec(shot(dir, %{entry: %{allow_redirect: true}}), "chrome", nil)
+      assert spec["shot"]["allow_redirect"] == true
+      spec = Cdp.build_spec(shot(dir), "chrome", nil)
+      assert spec["shot"]["allow_redirect"] == false
+    end
+
     test "ok", %{tmp_dir: dir} do
       assert {:ok, %{text: _}} = run_fake(dir, ~s({"ok":true,"blocked":[]}))
     end
@@ -643,6 +656,20 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert {:error, {:shot, msg}} = real(ctx, %{path: "/expired", entry: %{path: "/expired"}})
       assert msg =~ "redirected to /login"
       refute File.exists?(Path.join(ctx.dir, "shot.png"))
+    end
+
+    test "a route that redirects to another page is reported, not shot (bd-92wtof)", ctx do
+      assert {:error, {:redirected, "/moved", "/home"}} =
+               real(ctx, %{path: "/moved", entry: %{path: "/moved"}})
+
+      refute File.exists?(Path.join(ctx.dir, "shot.png"))
+    end
+
+    test "allow_redirect keeps the redirect target's shot", ctx do
+      assert {:ok, _} =
+               real(ctx, %{path: "/moved", entry: %{path: "/moved", allow_redirect: true}})
+
+      assert png?(ctx.dir)
     end
 
     test "a missing login field names the selector", ctx do

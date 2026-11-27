@@ -31,6 +31,9 @@ defmodule Wardmast.Test.CaptureStubShooter do
             File.write!(spec.out_file, "png:#{spec.role}:#{spec.path}")
             dom_text(ctx, spec.role)
 
+          {:redirect, final} ->
+            {:error, {:redirected, spec.path, final}}
+
           status ->
             {:error, {:http_status, status}}
         end

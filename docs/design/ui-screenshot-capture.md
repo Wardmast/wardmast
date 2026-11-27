@@ -620,6 +620,7 @@ characters. `selector` is a Playwright selector string (CSS, `text=`, `role=`,
       "wait_for": {"selector": "#modal", "state": "visible", "timeout_ms": 5000},  // optional, before capture
       "target": {"selector": "#modal"},   // optional: element screenshot; default = the viewport
       "full_page": false,                 // optional bool, default false; ignored with "target"; clipped to 8000 px tall
+      "allow_redirect": false,            // optional bool, default false; true keeps the shot even when the route redirects to another path (default: such a shot is recorded as "redirected", no image)
       "hide": ["#clock", ".relative-time"]// optional 0..5 selectors set to visibility:hidden (nondeterministic text)
     }
   ]

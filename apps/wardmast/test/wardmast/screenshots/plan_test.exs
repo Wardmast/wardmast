@@ -136,4 +136,18 @@ defmodule Wardmast.Screenshots.PlanTest do
       assert {:ok, %Plan{shots: [%{id: "h"}]}} = Plan.read(path, @config)
     end
   end
+
+  describe "allow_redirect (bd-92wtof)" do
+    defp parse_shot(extra) do
+      doc = %{"version" => 1, "shots" => [Map.merge(%{"id" => "a", "path" => "/a"}, extra)]}
+      Plan.parse(json(doc), @config)
+    end
+
+    test "defaults to false, accepts true, and rejects a non-boolean" do
+      assert {:ok, %{shots: [%{allow_redirect: false}]}} = parse_shot(%{})
+      assert {:ok, %{shots: [%{allow_redirect: true}]}} = parse_shot(%{"allow_redirect" => true})
+      assert {:error, {:invalid, errors}} = parse_shot(%{"allow_redirect" => "yes"})
+      assert Enum.any?(errors, &(&1 =~ "allow_redirect"))
+    end
+  end
 end

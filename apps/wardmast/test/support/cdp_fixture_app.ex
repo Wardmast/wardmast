@@ -147,6 +147,10 @@ defmodule Wardmast.Test.CdpFixtureApp do
     end
   end
 
+  get "/moved" do
+    redirect(conn, "/home")
+  end
+
   get "/expired" do
     redirect(conn, "/login")
   end

@@ -11,6 +11,8 @@
 //                                                            page's text (JSON) at spec.text_file
 //   {"ok":false,"kind":"http_status","status":404}           the route answered >= 400
 //   {"ok":false,"kind":"shot","reason":"..."}                anything else (login, a step, ...)
+//   {"ok":false,"kind":"redirected","requested":"/a","final":"/b"}
+//                                                            the route landed on another path (paths only)
 //   {"ok":false,"kind":"fixture_marker","problem":"status|redirected|missing|failed"}
 //                                                            the fixture marker was not shown in the
 //                                                            logged-in session; nothing was shot
@@ -440,6 +442,7 @@ async function shoot(spec) {
       })
     }
     assertStillLoggedIn(page, spec)
+    assertNotRedirected(page, spec)
 
     for (const [i, step] of (shot.steps || []).entries()) {
       try {
@@ -460,6 +463,7 @@ async function shoot(spec) {
     }
 
     await settle(page)
+    if ((shot.steps || []).length === 0) assertNotRedirected(page, spec)
     for (const selector of shot.hide || []) {
       await page
         .locator(selector)
@@ -490,6 +494,23 @@ function assertStillLoggedIn(page, spec) {
       `redirected to ${where(page.url())} after logging in (the login did not hold, or the ` +
         `persona may not open ${spec.path})`
     )
+  }
+}
+
+// bd-92wtof: the route (after any login / post-login round trip) must still be the page the shot
+// asked for. A different final path is reported as {requested, final} (paths only, never content)
+// and nothing is shot, unless the shot sets `allow_redirect`. Trailing slashes and the query string
+// do not count as a redirect.
+function assertNotRedirected(page, spec) {
+  if ((spec.shot || {}).allow_redirect === true) return
+  const trim = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p)
+  const requested = trim(new URL(spec.base_url + spec.path).pathname)
+  const final = trim(new URL(page.url()).pathname)
+  if (requested !== final) {
+    throw new ShotError("redirected", `route ${requested} redirected to ${final}`, {
+      requested,
+      final
+    })
   }
 }
 

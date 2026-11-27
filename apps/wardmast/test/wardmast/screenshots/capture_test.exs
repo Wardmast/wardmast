@@ -153,6 +153,65 @@ defmodule Wardmast.Screenshots.CaptureTest do
     assert File.exists?(by_id["gone"].before.file)
   end
 
+  describe "a route that redirects (bd-92wtof)" do
+    alias Wardmast.Screenshots.Section
+    alias Wardmast.Worker.ReviewGate.ScreenshotGate
+
+    defp redirect_plan(dir, extra \\ %{}) do
+      write_plan!(dir, [Map.merge(%{"id" => "devices", "path" => "/admin/devices"}, extra)])
+    end
+
+    test "both sides redirecting is a redirected pair, never an unchanged one", %{tmp_dir: dir} do
+      routes = %{
+        "before" => %{"/admin/devices" => {:redirect, "/dashboard"}},
+        "after" => %{"/admin/devices" => {:redirect, "/dashboard"}}
+      }
+
+      assert {:ok, %{pairs: [pair]} = result} = run(dir, redirect_plan(dir), %{routes: routes})
+      assert pair.kind == :redirected
+
+      assert %{status: :redirected, requested: "/admin/devices", final: "/dashboard"} =
+               pair.after
+
+      assert %{status: :redirected} = pair.before
+      refute File.exists?(Path.join([dir, "out", "images", "devices__desktop-light__after.png"]))
+
+      shot = recorded(dir)["shots"] |> hd()
+      assert shot["kind"] == "redirected"
+
+      assert shot["after"] == %{
+               "status" => "redirected",
+               "requested" => "/admin/devices",
+               "final" => "/dashboard"
+             }
+
+      text = "route /admin/devices redirected to /dashboard; no screenshot"
+      assert {:proceed, brief} = ScreenshotGate.route({:ok, result})
+      assert brief =~ text
+
+      pr_body = result |> Capture.poster_pairs() |> Enum.map(&poster_row/1) |> Section.render()
+      assert pr_body =~ text
+    end
+
+    test "only the head redirecting keeps the base image", %{tmp_dir: dir} do
+      routes = %{
+        "before" => %{"/admin/devices" => 200},
+        "after" => %{"/admin/devices" => {:redirect, "/dashboard"}}
+      }
+
+      assert {:ok, %{pairs: [pair]}} = run(dir, redirect_plan(dir), %{routes: routes})
+      assert pair.kind == :redirected
+      assert %{status: :ok} = pair.before
+      assert %{status: :redirected, final: "/dashboard"} = pair.after
+    end
+
+    test "allow_redirect reaches the shooter entry", %{tmp_dir: dir} do
+      routes = %{"before" => %{"/admin/devices" => 200}, "after" => %{"/admin/devices" => 200}}
+      plan = redirect_plan(dir, %{"allow_redirect" => true})
+      assert {:ok, %{pairs: [%{kind: :changed}]}} = run(dir, plan, %{routes: routes})
+    end
+  end
+
   test "before_path is the path used at the base commit", %{tmp_dir: dir} do
     plan = write_plan!(dir, [%{"id" => "moved", "path" => "/p", "before_path" => "/patient"}])
     routes = %{"before" => %{"/patient" => 200}, "after" => %{"/p" => 200}}
