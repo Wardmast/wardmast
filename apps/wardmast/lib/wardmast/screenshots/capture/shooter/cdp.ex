@@ -157,7 +157,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         "wait_for" => entry.wait_for,
         "target" => entry.target,
         "full_page" => entry.full_page,
-        "hide" => entry.hide
+        "hide" => entry.hide,
+        "allow_redirect" => Map.get(entry, :allow_redirect, false)
       },
       "login" => login,
       "fixture_marker" => marker_spec(spec, login)
@@ -353,6 +354,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       %{"ok" => false, "kind" => "fixture_marker"} = answer ->
         status = if is_integer(answer["status"]), do: answer["status"]
         {:error, {:fixture_marker, marker_reason(spec, answer["problem"], status)}}
+
+      %{"ok" => false, "kind" => "redirected", "requested" => from, "final" => to}
+      when is_binary(from) and is_binary(to) ->
+        {:error, {:redirected, from, to}}
 
       %{"ok" => false, "kind" => "http_status", "status" => status} when is_integer(status) ->
         {:error, {:http_status, status}}

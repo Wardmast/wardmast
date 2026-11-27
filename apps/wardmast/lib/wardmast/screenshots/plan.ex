@@ -17,7 +17,7 @@ defmodule Wardmast.Screenshots.Plan do
   alias Wardmast.Screenshots.Config
 
   @top_keys ~w(version skip notes shots)
-  @shot_keys ~w(id title path before_path as viewports themes steps wait_for target full_page hide seed)
+  @shot_keys ~w(id title path before_path as viewports themes steps wait_for target full_page hide seed allow_redirect)
   @id ~r/\A[a-z0-9][a-z0-9-]{0,62}\z/
   @max_shots 20
   @max_steps 12
@@ -52,7 +52,8 @@ defmodule Wardmast.Screenshots.Plan do
           wait_for: map() | nil,
           target: map() | nil,
           full_page: boolean(),
-          hide: [String.t()]
+          hide: [String.t()],
+          allow_redirect: boolean()
         }
 
   @type t :: %__MODULE__{skip: String.t() | nil, notes: String.t() | nil, shots: [entry()]}
@@ -141,6 +142,7 @@ defmodule Wardmast.Screenshots.Plan do
       selector_obj(shot["wait_for"], "#{label}.wait_for") ++
       selector_obj(shot["target"], "#{label}.target") ++
       hide_errors(shot["hide"], label) ++
+      bool_errors(shot["allow_redirect"], "#{label}.allow_redirect") ++
       seed_errors(shot["seed"], config, label) ++
       persona_errors(shot["as"], config, label)
   end
@@ -232,6 +234,10 @@ defmodule Wardmast.Screenshots.Plan do
   defp hide_errors(_list, label),
     do: ["#{label}.hide must be a list of at most #{@max_hide} selectors"]
 
+  defp bool_errors(nil, _label), do: []
+  defp bool_errors(value, _label) when is_boolean(value), do: []
+  defp bool_errors(_value, label), do: ["#{label} must be true or false"]
+
   defp seed_errors(nil, _config, _label), do: []
 
   defp seed_errors(seed, config, label),
@@ -298,7 +304,8 @@ defmodule Wardmast.Screenshots.Plan do
         wait_for: shot["wait_for"],
         target: shot["target"],
         full_page: shot["full_page"] == true,
-        hide: shot["hide"] || []
+        hide: shot["hide"] || [],
+        allow_redirect: shot["allow_redirect"] == true
       }
     end
   end

@@ -89,13 +89,14 @@ defmodule Wardmast.Screenshots.Capture do
           }
           | %{status: :absent, reason: String.t()}
           | %{status: :withheld, rule: String.t()}
+          | %{status: :redirected, requested: String.t(), final: String.t()}
   @type pair :: %{
           id: String.t(),
           title: String.t(),
           viewport: String.t(),
           theme: String.t(),
           label: String.t(),
-          kind: :changed | :new | :removed,
+          kind: :changed | :new | :removed | :redirected,
           before: side(),
           after: side()
         }
@@ -672,6 +673,9 @@ defmodule Wardmast.Screenshots.Capture do
         {:error, {:http_status, 404}} ->
           {:ok, :absent}
 
+        {:error, {:redirected, requested, final}} ->
+          {:ok, {:ok, %{status: :redirected, requested: requested, final: final}}}
+
         {:error, {:fixture_marker, reason}} ->
           {:error, marker_failure(role, reason)}
 
@@ -784,6 +788,14 @@ defmodule Wardmast.Screenshots.Capture do
     end
   end
 
+  # bd-92wtof: a side whose route redirected has no picture of the page that was asked for, so the
+  # pair is never `:changed` (two redirects to the same page would read as an unchanged UI).
+  defp pair_one(entry, {:ok, %{status: :redirected}} = before_side, after_side),
+    do: redirected_pair(entry, before_side, after_side)
+
+  defp pair_one(entry, before_side, {:ok, %{status: :redirected}} = after_side),
+    do: redirected_pair(entry, before_side, after_side)
+
   defp pair_one(entry, {:ok, before_img}, {:ok, after_img}),
     do: {:ok, build_pair(entry, :changed, before_img, after_img)}
 
@@ -809,6 +821,12 @@ defmodule Wardmast.Screenshots.Capture do
        detail: %{path: entry.path, status: 404}
      )}
   end
+
+  defp redirected_pair(entry, before_side, after_side),
+    do: {:ok, build_pair(entry, :redirected, side_of(before_side), side_of(after_side))}
+
+  defp side_of({:ok, side}), do: side
+  defp side_of(:absent), do: %{status: :absent, reason: "absent at this commit (404)"}
 
   defp build_pair(entry, kind, before_side, after_side) do
     %{
@@ -840,6 +858,8 @@ defmodule Wardmast.Screenshots.Capture do
     do: %{name: name, data: File.read!(file)}
 
   defp poster_side(%{status: :absent, reason: reason}), do: {:text, reason}
+
+  defp poster_side(%{status: :redirected} = side), do: {:text, redirect_text(side)}
 
   defp poster_side(%{status: :withheld, rule: rule}),
     do: {:text, "withheld by the data-safety scan: #{rule}"}
@@ -913,6 +933,9 @@ defmodule Wardmast.Screenshots.Capture do
       "bytes" => s.bytes
     }
 
+  defp side_json(%{status: :redirected, requested: requested, final: final}),
+    do: %{"status" => "redirected", "requested" => requested, "final" => final}
+
   defp side_json(%{status: :withheld, rule: rule}),
     do: %{"status" => "withheld", "rule" => rule}
 
@@ -927,6 +950,11 @@ defmodule Wardmast.Screenshots.Capture do
       _ -> :ok
     end
   end
+
+  @doc "The reviewer/PR text for a side whose route redirected (paths only)."
+  @spec redirect_text(%{requested: String.t(), final: String.t()}) :: String.t()
+  def redirect_text(%{requested: requested, final: final}),
+    do: "route #{requested} redirected to #{final}; no screenshot"
 
   defp describe_role("before"), do: "merge-base"
   defp describe_role("after"), do: "head"
