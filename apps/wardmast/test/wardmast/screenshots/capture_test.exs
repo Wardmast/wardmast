@@ -408,6 +408,32 @@ defmodule Wardmast.Screenshots.CaptureTest do
       assert failure.message =~ "(at the merge-base)"
     end
 
+    test "a transport failure adds the booter's own probe of the failing path to the log", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/patients"}])
+
+      ctx = %{
+        shoot_error:
+          {:shot, "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/switch-tenant/x?a=b"},
+        server_logs: %{"before" => "BEFORE-LOG"},
+        diagnoses: %{"before" => "host probe GET /switch-tenant/x via the relay: status 200"}
+      }
+
+      assert {:error, failure} = run(dir, plan, ctx)
+      assert_received {:diagnose, "before", "/switch-tenant/x?a=b"}
+      assert failure.server_log =~ "BEFORE-LOG"
+      assert failure.server_log =~ "host probe GET /switch-tenant/x via the relay: status 200"
+      assert recorded(dir)["failure"]["server_log"] =~ "host probe GET /switch-tenant/x"
+    end
+
+    test "a failure that is not a transport error is not probed", %{tmp_dir: dir} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      ctx = %{shoot_error: {:shot, "selector #edit not found"}}
+      assert {:error, _} = run(dir, plan, ctx)
+      refute_received {:diagnose, _, _}
+    end
+
     test "a shot failure records the tail of the app's server output for that side", %{
       tmp_dir: dir
     } do

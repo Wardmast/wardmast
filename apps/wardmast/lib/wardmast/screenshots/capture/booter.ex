@@ -35,6 +35,13 @@ defmodule Wardmast.Screenshots.Capture.Booter do
   @doc "Optional. The tail of the app's own server output, for a failure report."
   @callback log_tail(spec(), handle :: term()) :: String.t() | nil
 
+  @doc """
+  Optional (bd-b2e1ev). After a transport failure (the browser got an empty or reset response):
+  the host's own GET of `path` straight to the app, described in one line, to tell "the app
+  never answers that path" from "only the browser's route to it fails".
+  """
+  @callback diagnose(spec(), handle :: term(), path :: String.t()) :: String.t() | nil
+
   @callback stop(spec(), handle :: term()) :: :ok
-  @optional_callbacks ready: 2, log_tail: 2
+  @optional_callbacks ready: 2, log_tail: 2, diagnose: 3
 end
