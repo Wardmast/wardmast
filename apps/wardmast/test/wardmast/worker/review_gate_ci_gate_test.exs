@@ -32,6 +32,43 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   alias Wardmast.Worker.ReviewGate
   alias Wardmast.Worker.VisualBaselines
 
+  # The real Reconciler for the boot sweep's data steps; process-killing sweeps are no-ops and
+  # the resume reports instead of starting a session (see `boot_sweep!/1`).
+  defmodule BootReconciler do
+    @moduledoc false
+    alias Wardmast.Workers.Reconciler
+
+    def sweep_worker_process_groups(_), do: {:ok, 0}
+    def sweep_worker_scopes(_), do: {:ok, 0}
+    defdelegate reconcile_orphaned_runs(opts), to: Reconciler
+    defdelegate reconcile_shutdown_casualties(opts), to: Reconciler
+    defdelegate reconcile_review_passes(opts), to: Reconciler
+    defdelegate reconcile_held_resumes(opts), to: Reconciler
+    defdelegate restarted_ids(results), to: Reconciler
+    defdelegate reconcile_open_pr_tasks(opts), to: Reconciler
+
+    def reconcile_ci_waits(opts) do
+      rearm_opts = Process.get(:boot_rearm_opts, [])
+
+      Reconciler.reconcile_ci_waits(
+        Keyword.put(opts, :rearm_fun, fn issue ->
+          Wardmast.Worker.ReviewGate.rearm_ci_wait(issue.id, rearm_opts)
+        end)
+      )
+    end
+
+    def reconcile_resumable_tasks(opts) do
+      test_pid = Process.get(:boot_test_pid)
+
+      Reconciler.reconcile_resumable_tasks(
+        Keyword.put(opts, :resume_fun, fn issue ->
+          send(test_pid, {:resume_attempt, issue.id})
+          {:ok, :stubbed}
+        end)
+      )
+    end
+  end
+
   @probe Path.expand("../../fixtures/review_ci_probe.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @echo_done Path.expand("../../fixtures/echo_with_done.sh", __DIR__)
@@ -1863,6 +1900,70 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # bd-a9q2sp, finding "follow the production boot sequence": the tests above call
+    # `rearm_ci_wait/2` themselves. These run the real boot sweep (`Boot.ReconcileSweep.steps/1`)
+    # over the real `Workers.Reconciler`, in production order, against a ticket whose author's run
+    # the shutdown recorded `interrupted` — so the CI-wait re-arm, the review-pass sweep, the held
+    # -resume sweep, the open-PR sweep and the resume sweep all look at the ticket, and a resume
+    # that is not skipped would show up as a `:resume` message.
+    test "boot sweep, CI polls then reads green: one gate, no resume, the reviewer is dispatched",
+         ctx do
+      rig = rig(ctx, "feature/ci-a9-boot-green")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      boot_sweep!()
+      refute_received {:resume_attempt, _}
+      assert [gate] = live_gates(rig)
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert [^gate] = live_gates(rig)
+      refute_received {:resume_attempt, _}
+      assert Worker.whereis(rig.task.id) == nil
+      assert implement_runs(rig) == 1
+      refute_crashed(rig)
+      stop_gate(gate)
+    end
+
+    test "boot sweep, CI polls then reads red: one gate, no resume, the fix round runs", ctx do
+      rig = rig(ctx, "feature/ci-a9-boot-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      interrupt_implement_runs(rig)
+
+      boot_sweep!(revise_command: [@revise_commit], rounds: 3)
+      refute_received {:resume_attempt, _}
+      assert [gate] = live_gates(rig)
+      wait_until(fn -> awaiting_ci?(gate) end)
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0
+
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      refute_received {:resume_attempt, _}
+      refute_crashed(rig)
+      stop_gate(gate)
+    end
+
     test "the head moved while the server was down: waits on the head that is there", ctx do
       rig = rig(ctx, "feature/ci-17")
       start_forge(ctx, rig, [:running])
@@ -2108,6 +2209,49 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
     # The registry drops the killed author asynchronously; a restart starts empty.
     wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
+  end
+
+  # The boot sweep (`Boot.ReconcileSweep.steps/1`) over the real Reconciler, as `Application`
+  # runs it after a deploy. Only what would kill processes or start a real session is swapped
+  # (`BootReconciler`): the process-group and scope sweeps, and the resume itself, which reports
+  # `{:resume_attempt, id}` to the test. The CI-wait re-arm is the real sweep's, handed the
+  # test's stub forge and reviewer argv.
+  defp boot_sweep!(gate_extra \\ []) do
+    Process.put(:boot_rearm_opts, gate_opts(gate_extra))
+    Process.put(:boot_test_pid, self())
+
+    Wardmast.Boot.ReconcileSweep.steps(
+      primary?: true,
+      reconciler: __MODULE__.BootReconciler,
+      recovery: fn _ -> {:ok, %{}} end
+    )
+  end
+
+  # The ReviewGate processes alive for the ticket (there must be exactly one).
+  defp live_gates(rig) do
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_, pid, :worker, [ReviewGate]} when is_pid(pid) ->
+        if :sys.get_state(pid).task_id == rig.task.id, do: [pid], else: []
+
+      _ ->
+        []
+    end)
+  end
+
+  # The attention sweep's read two minutes on (past the 60s orphan grace).
+  defp refute_crashed(rig) do
+    issue = Ash.get!(Issue, rig.task.id)
+    later = DateTime.add(DateTime.utc_now(), 120)
+
+    causes =
+      [issues: [issue], now: later]
+      |> Wardmast.Tasks.Attention.items()
+      |> Enum.map(& &1.attention.cause)
+
+    refute :run_crashed in causes,
+           "nothing is working the ticket yet it reads crashed (#{inspect(issue.review_gate_state)})"
   end
 
   defp lines(log, needle),

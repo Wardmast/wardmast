@@ -634,6 +634,45 @@ defmodule Wardmast.Reviews.PushStateTest do
       assert state.remote_head == local
       assert remote_sha(tmp, b) == local
     end
+
+    # The "during" half: the competing push has NOT landed when this push fails; it lands a
+    # moment later. A single re-read would park; the bounded re-read sees it.
+    test "a competing push still in flight when this one fails is waited for, not refused",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/in-flight")
+      git!(["push", "-q", "-u", "origin", b], repo)
+      local = commit(repo, "fix.txt")
+
+      hook = Path.join([repo, ".git", "hooks", "pre-push"])
+
+      File.write!(hook, """
+      #!/bin/sh
+      unset GIT_DIR
+      (sleep 1; git -C #{repo} push --no-verify -q origin HEAD:refs/heads/#{b}) >/dev/null 2>&1 &
+      echo "error: cannot lock ref: the other push holds it" >&2
+      exit 1
+      """)
+
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, :pushed, state} =
+               PushState.ensure_pushed(repo, b, recheck_attempts: 30, recheck_interval_ms: 250)
+
+      assert state.status == :in_sync
+      assert state.remote_head == local
+    end
+
+    test "a failed push whose head never lands is still refused after the bounded re-read",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/never")
+      commit(repo, "a.txt")
+      reject_pushes_with(tmp, "branch is protected")
+
+      assert {:error, :push_failed, _} =
+               PushState.ensure_pushed(repo, b, recheck_attempts: 2, recheck_interval_ms: 10)
+    end
   end
 
   describe "ssh_remote/1" do

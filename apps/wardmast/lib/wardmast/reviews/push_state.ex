@@ -381,23 +381,41 @@ defmodule Wardmast.Reviews.PushState do
   end
 
   # bd-a9q2sp (emr-5kb4kx): a push can fail because the same head landed through another
-  # route a moment before (the worker's own pre-push check pushing at the same time: a lock
-  # on the ref, a lost race). The `:ahead` reading was taken before that, so refusing on it
-  # parks a ticket whose branch is on the remote. Ask the remote once more, this time after
-  # the attempt; only a head that is positively there is let through. This is a read, not a
-  # second push, so the guard's one-attempt bound (`G18`) stands. A refusal that is not a
-  # race (`{:needs_operator_push, _}`) is never second-guessed.
+  # route a moment before, or is landing right now (a second pusher of the same commit: a lock
+  # on the ref held by a push still in flight, a lost race). The `:ahead` reading was taken
+  # before that, so refusing on it parks a ticket whose branch is on the remote. Ask the remote
+  # again after the attempt, a few times a short interval apart (the competing push may not
+  # have finished at the first read, and the read's own fetch can lose the same ref lock);
+  # only a head that is positively there is let through. These are reads, not further pushes,
+  # so the guard's one-attempt bound (`G18`) stands. A refusal that is not a race
+  # (`{:needs_operator_push, _}`) is never second-guessed. `:recheck_attempts` (default 4) and
+  # `:recheck_interval_ms` (default 500) bound it.
   defp recheck_after_failed_push(path, branch, state, opts, :push_failed) do
-    after_attempt = inspect_branch(path, branch, opts)
+    attempts = Keyword.get(opts, :recheck_attempts, 4)
+    interval = Keyword.get(opts, :recheck_interval_ms, 500)
 
-    case verdict(after_attempt) do
-      :pushed -> {:ok, :pushed, after_attempt}
-      _ -> {:error, :push_failed, state}
+    case recheck_remote(path, branch, opts, attempts, interval) do
+      {:pushed, after_attempt} -> {:ok, :pushed, after_attempt}
+      :not_there -> {:error, :push_failed, state}
     end
   end
 
   defp recheck_after_failed_push(_path, _branch, state, _opts, reason),
     do: {:error, reason, state}
+
+  defp recheck_remote(_path, _branch, _opts, attempts, _interval) when attempts <= 0,
+    do: :not_there
+
+  defp recheck_remote(path, branch, opts, attempts, interval) do
+    after_attempt = inspect_branch(path, branch, opts)
+
+    if verdict(after_attempt) == :pushed do
+      {:pushed, after_attempt}
+    else
+      if attempts > 1, do: Process.sleep(interval)
+      recheck_remote(path, branch, opts, attempts - 1, interval)
+    end
+  end
 
   @workflow_refusal ~r/without `workflows` permission/
   @workflow_path ~r/workflow `([^`]+)`/
