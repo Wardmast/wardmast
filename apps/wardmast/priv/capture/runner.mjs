@@ -110,6 +110,27 @@ const str = (v, what) => {
   return v
 }
 
+// bd-b2e1ev: a GET that the app drops on the floor (net::ERR_EMPTY_RESPONSE, a reset or refused
+// connection) is retried a few times with a short back-off before it is a failure: a freshly
+// booted app can drop one request (a worker recycling, a code reload) and answer the next. Only
+// these transport errors are retried; a status code or a timeout is never.
+const TRANSIENT_NET = /net::ERR_(EMPTY_RESPONSE|CONNECTION_RESET|CONNECTION_REFUSED|CONNECTION_CLOSED|CONNECTION_ABORTED)/
+const NAV_ATTEMPTS = 4
+
+async function navigate(page, url, opts) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await page.goto(url, opts)
+    } catch (err) {
+      if (attempt >= NAV_ATTEMPTS || !TRANSIENT_NET.test(String(err && err.message))) {
+        if (attempt > 1) err.message = `${err.message} (after ${attempt} attempts)`
+        throw err
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
+    }
+  }
+}
+
 async function settle(page, ms = 3000) {
   // Best effort: an app that never goes network-idle (long polls) is shot as it stands.
   await page.waitForLoadState("networkidle", { timeout: ms }).catch(() => {})
@@ -146,7 +167,7 @@ async function doLogin(page, spec, timeoutMs) {
   const ok = successMatcher(login.success)
   const loginUrl = spec.base_url + login.path
 
-  const resp = await page.goto(loginUrl, { waitUntil: "load", timeout: timeoutMs })
+  const resp = await navigate(page, loginUrl, { waitUntil: "load", timeout: timeoutMs })
   if (resp && resp.status() >= 400) {
     throw fail(`login page GET ${login.path} answered ${resp.status()}`)
   }
@@ -224,7 +245,7 @@ async function doLogin(page, spec, timeoutMs) {
     const target = spec.base_url + login.post_login_path
     let resp
     try {
-      resp = await page.goto(target, { waitUntil: "load", timeout: timeoutMs })
+      resp = await navigate(page, target, { waitUntil: "load", timeout: timeoutMs })
     } catch (err) {
       throw fail(`login.post_login_path ${login.post_login_path}: ${firstLine(err)}`)
     }
@@ -252,7 +273,7 @@ async function checkFixtureMarker(page, spec, timeoutMs) {
 
   let resp
   try {
-    resp = await page.goto(spec.base_url + marker.path, { waitUntil: "load", timeout: timeoutMs })
+    resp = await navigate(page, spec.base_url + marker.path, { waitUntil: "load", timeout: timeoutMs })
   } catch {
     throw problem("failed")
   }
@@ -302,7 +323,7 @@ async function runStep(page, spec, step, theme) {
     case "scroll_to":
       return loc().scrollIntoViewIfNeeded(opts)
     case "goto": {
-      const resp = await page.goto(withQuery(spec.base_url, str(step.path, "path"), theme.query), {
+      const resp = await navigate(page, withQuery(spec.base_url, str(step.path, "path"), theme.query), {
         waitUntil: "load",
         timeout: spec.timeout_ms
       })
@@ -409,7 +430,7 @@ async function shoot(spec) {
     if (spec.login) await doLogin(page, spec, spec.timeout_ms)
     await checkFixtureMarker(page, spec, spec.timeout_ms)
 
-    const resp = await page.goto(withQuery(spec.base_url, spec.path, theme.query), {
+    const resp = await navigate(page, withQuery(spec.base_url, spec.path, theme.query), {
       waitUntil: "load",
       timeout: spec.timeout_ms
     })
