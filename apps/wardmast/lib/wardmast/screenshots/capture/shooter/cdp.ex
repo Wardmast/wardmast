@@ -173,7 +173,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
          {:ok, post} <- post_login_path(login, persona, creds, spec) do
       {:ok,
        Map.merge(
-         Map.take(login, ~w(kind path username_selector password_selector submit_selector)),
+         Map.take(
+           login,
+           ~w(kind path username_selector password_selector submit_selector ready_selector timeout_ms)
+         ),
          %{
            "persona" => persona,
            "username" => creds["username"],

@@ -102,6 +102,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert pick(%{as: "admin"}, %{config: %Config{login: @login}}) == Cdp
     end
 
+    test "login.ready_selector and timeout_ms ride in the spec", %{tmp_dir: dir} do
+      login = Map.merge(@login, %{"ready_selector" => "#ready", "timeout_ms" => 2000})
+      spec = Cdp.build_spec(shot(dir, %{login: login}), "/c")
+      assert spec["login"]["ready_selector"] == "#ready"
+      assert spec["login"]["timeout_ms"] == 2000
+    end
+
     test "login kind none does not need it" do
       assert pick(%{}, %{config: %Config{login: %{"kind" => "none"}}}) == Chromium
     end
@@ -558,7 +565,31 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert {:error, {:shot, msg}} = real(ctx, %{login: login})
       assert msg =~ "did not succeed"
       assert msg =~ "/login"
+      # the final URL path and the visible alert text (first line only)
+      assert msg =~ "still on /login"
+      assert msg =~ "Invalid email or password"
+      refute msg =~ "second line"
       refute File.exists?(Path.join(ctx.dir, "shot.png"))
+    end
+
+    test "a LiveView-style form that ignores input before it connects still logs in", ctx do
+      login = Map.put(@login, "path", "/lv-login")
+      assert {:ok, %{text: texts}} = real(ctx, %{login: login})
+      assert Enum.join(texts, "\n") =~ "Dashboard"
+    end
+
+    test "an explicit login.ready_selector is awaited before filling", ctx do
+      login =
+        @login |> Map.put("path", "/lv-login") |> Map.put("ready_selector", "#main.phx-connected")
+
+      assert {:ok, %{text: _}} = real(ctx, %{login: login})
+    end
+
+    test "a ready_selector that never appears fails naming it", ctx do
+      login = @login |> Map.put("ready_selector", "#never") |> Map.put("timeout_ms", 1000)
+      assert {:error, {:shot, msg}} = real(ctx, %{login: login})
+      assert msg =~ "ready_selector"
+      assert msg =~ "#never"
     end
 
     test "an unmet success condition fails the shot with the condition in the reason", ctx do

@@ -136,6 +136,7 @@ defmodule Wardmast.Screenshots.ConfigTest do
             "username_selector" => "#email",
             "password_selector" => "#password",
             "submit_selector" => "button",
+            "ready_selector" => "[data-phx-main].phx-connected",
             "success" => %{"path_not" => "/login", "url_not_contains" => "/sign-in"},
             "personas" => %{"admin" => %{"username" => "a@example.com", "password" => "pw"}}
           },
@@ -237,6 +238,21 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert errors(%{"limits" => %{"merge_wait_seconds" => 900}}) == []
       assert [_] = errors(%{"limits" => %{"merge_wait_seconds" => 0}})
       assert [_] = errors(%{"limits" => %{"bogus_limit" => 1}})
+    end
+
+    test "login.ready_selector must be a non-empty string" do
+      form = %{
+        "kind" => "form",
+        "path" => "/l",
+        "username_selector" => "#u",
+        "password_selector" => "#p",
+        "submit_selector" => "#s",
+        "default_persona" => "a",
+        "personas" => %{"a" => %{"username" => "u", "password" => "p"}}
+      }
+
+      assert [] = errors(%{"login" => Map.put(form, "ready_selector", "#ok")})
+      assert [_] = errors(%{"login" => Map.put(form, "ready_selector", "")})
     end
 
     test "login kinds" do

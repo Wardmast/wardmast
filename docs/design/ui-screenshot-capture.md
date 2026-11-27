@@ -540,6 +540,12 @@ pod:       for role in [before(base), after(head)]:
     shot the booter re-probes readiness (`Booter.ready/2`); a dead app fails the capture as
     `:app_not_ready`, distinct from `:shot_failed`, and every failure for a side carries the tail
     of the app's server output as `server_log` in `capture.json`.
+  * **Login readiness and diagnostics (bd-886p6u).** A LiveView sign-in form resets when its
+    socket connects, so the runner waits for `login.ready_selector` (default, when the page has
+    `[data-phx-main]`: `[data-phx-main].phx-connected`; bounded by `login.timeout_ms`) before
+    filling. A failed login's reason carries the final URL path and the visible flash/alert text
+    (first line, at most 200 chars), and the `shot_failed` message names the side (`at the
+    merge-base` / `at the head`).
   * Tests: `Shooter.CdpTest` drives the real runner against a login-gated fixture app
     (`Wardmast.Test.CdpFixtureApp`) for correct and wrong credentials, both success conditions, an
     unmet condition, a session that does not hold, steps, `wait_for`, `target`, `full_page`,
@@ -723,6 +729,7 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
       "kind": "form",                        // none | form | cmd
       "default_persona": "admin",
       "path": "/login", "username_selector": "#email", "password_selector": "#password",
+      "ready_selector": "[data-phx-main].phx-connected",  // optional: awaited on the sign-in page before filling; default that, when the page has [data-phx-main]
       "submit_selector": "button[type=submit]", "success": {"path_not": "/login"},  // and/or {"url_not_contains": "/sign-in"}; default: path_not = path
       "personas": {"admin": {"username": "admin@example.com", "password": "fixture-only-password"}}
       // kind "cmd": {"cmd": "mix run priv/repo/screenshot_login.exs {{persona}}", "personas": ["admin","viewer"], "default_persona": "admin"}
