@@ -594,6 +594,23 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp ci_wait_round(_issue), do: nil
 
+  @doc false
+  # Register the calling gate under `task_id` (`Wardmast.Worker.GateRegistry`, `:duplicate`) and
+  # return the pids of the gates ALREADY live for that ticket. A registry entry dies with its
+  # process, so a gate that stopped is never listed.
+  @spec register_gate(String.t()) :: [pid()]
+  def register_gate(task_id) when is_binary(task_id) do
+    others =
+      for {pid, _} <- Registry.lookup(Wardmast.Worker.GateRegistry, task_id),
+          pid != self(),
+          do: pid
+
+    {:ok, _} = Registry.register(Wardmast.Worker.GateRegistry, task_id, nil)
+    others
+  rescue
+    ArgumentError -> []
+  end
+
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -1046,6 +1063,21 @@ defmodule Wardmast.Worker.ReviewGate do
     # survives a restart, and the verdict goes to the ticket (`deliver_verdict/4`).
     author = Keyword.get(opts, :author)
     task_id = Keyword.fetch!(opts, :task_id)
+
+    # bd-a9q2sp (emr-5kb4kx): the gates of one ticket share a worktree and push the same
+    # branch; a second live one is never intended, so it is named when it starts.
+    case register_gate(task_id) do
+      [] ->
+        :ok
+
+      others ->
+        Logger.warning(
+          "ReviewGate: task=#{task_id} already has #{length(others)} live gate(s) " <>
+            "(#{Enum.map_join(others, ", ", &inspect/1)}); this one (round " <>
+            "#{Keyword.get(opts, :round, 1)}, #{if author, do: "with", else: "no"} author, " <>
+            "rearmed=#{Keyword.get(opts, :rearmed, false)}) pushes the same branch"
+        )
+    end
 
     state = %{
       author: author,
