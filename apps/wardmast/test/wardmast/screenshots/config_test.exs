@@ -29,7 +29,10 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert c.plan_required == true
       assert c.base_url == "http://127.0.0.1:{{port}}"
       assert c.port_env == "PORT"
-      assert c.port_range == {32_000, 32_999}
+      assert c.port_range == {30_000, 31_999}
+      {_lo, hi} = c.port_range
+      {elo, _ehi} = Config.ephemeral_range()
+      assert hi < elo and hi < 32_768 and elem(c.port_range, 0) > 29_999
       assert c.login == %{"kind" => "none"}
       assert Map.keys(c.viewports) |> Enum.sort() == ["desktop", "mobile"]
       assert c.default_viewports == ["desktop"]
@@ -125,7 +128,7 @@ defmodule Wardmast.Screenshots.ConfigTest do
           "seed_cmd" => "mix run seeds.exs",
           "seeds" => %{"empty" => "mix run e.exs"},
           "port_env" => "PORT",
-          "port_range" => "32000-32999",
+          "port_range" => "30000-31999",
           "base_url" => "http://localhost:{{port}}",
           "env" => %{"DATABASE_PATH" => "{{scratch}}/{{role}}.sqlite3", "PHX_HOST" => "127.0.0.1"},
           "ready" => %{"path" => "/", "timeout_seconds" => 180, "expect" => "2xx"},
@@ -230,6 +233,9 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [_] = errors(%{"limits" => %{"max_shots" => 0}})
       assert [_] = errors(%{"limits" => %{"max_captures_per_ticket" => 0}})
       assert [_] = errors(%{"port_range" => "20000-20100"})
+      assert [msg] = errors(%{"port_range" => "32000-32999"})
+      assert msg =~ "ephemeral"
+      assert [] = errors(%{"port_range" => "31000-31999"})
       assert [_] = errors(%{"default_viewports" => ["nope"]})
     end
 
@@ -411,13 +417,13 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [msg] = errors_s(both)
       assert msg =~ "port 5432"
 
-      assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "port", 32_100)})
+      assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "port", 30_100)})
       assert msg =~ "port_range"
 
       assert [] =
                Config.validate(
                  Map.merge(@minimal, %{
-                   "port_range" => "40000-40100",
+                   "port_range" => "31000-31100",
                    "services" => %{"pg" => Map.put(@postgres, "port", 32_100)}
                  }),
                  "s"
