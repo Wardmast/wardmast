@@ -818,8 +818,8 @@ defmodule Wardmast.Screenshots.Config do
 
   defp fixture_check(_v, label),
     do: [
-      "#{label} must be {\"marker\": {\"path\": \"/..\", \"contains\": \"..\"}} " <>
-        "(optionally \"auth\": false to probe without logging in)"
+      ~s(#{label} must be {"marker": {"path": "/..", "contains": ".."}} ) <>
+        ~s[(optionally "auth": false to probe without logging in)]
     ]
 
   defp deny_patterns(v, label) when is_list(v) do
