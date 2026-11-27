@@ -619,6 +619,38 @@ defmodule Wardmast.Screenshots.Capture do
     end
   end
 
+  # A transport failure (empty or reset response) is probed from the host too, on the path the
+  # browser was loading: the answer lands next to the app's own output in the failure.
+  defp failure_log(st, spec, target, reason, path) do
+    log = server_log(st, spec, target)
+
+    with true <- transport_failure?(reason),
+         true <- function_exported?(st.booter, :diagnose, 3),
+         probe when is_binary(probe) <-
+           safe_call(
+             fn -> st.booter.diagnose(spec, target.handle, failing_path(reason, path)) end,
+             nil
+           ) do
+      String.trim("#{log}\n--- host probe ---\n#{String.replace_invalid(probe)}")
+    else
+      _ -> log
+    end
+  end
+
+  defp transport_failure?({:shot, detail}),
+    do: detail_text(detail) =~ ~r/net::ERR_(EMPTY_RESPONSE|CONNECTION_)/
+
+  defp transport_failure?(_), do: false
+
+  # The URL in the browser's message ("... at http://127.0.0.1:31234/switch-tenant/x"), which may be
+  # the login's post-login path rather than the shot's route.
+  defp failing_path({:shot, detail}, path) do
+    case Regex.run(~r{ at https?://[^/\s]+(/\S*)}, detail_text(detail)) do
+      [_, found] -> found
+      _ -> path
+    end
+  end
+
   defp server_log(st, spec, target) do
     if function_exported?(st.booter, :log_tail, 2) do
       case safe_call(fn -> st.booter.log_tail(spec, target.handle) end, nil) do
@@ -696,7 +728,7 @@ defmodule Wardmast.Screenshots.Capture do
 
       reason ->
         failure = shot_failure(reason, role, entry, path)
-        {:error, %{failure | server_log: server_log(st, spec, target)}}
+        {:error, %{failure | server_log: failure_log(st, spec, target, reason, path)}}
     end
   end
 

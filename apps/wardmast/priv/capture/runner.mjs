@@ -126,10 +126,24 @@ async function navigate(page, url, opts) {
     } catch (err) {
       if (attempt >= NAV_ATTEMPTS || !TRANSIENT_NET.test(String(err && err.message))) {
         if (attempt > 1) err.message = `${err.message} (after ${attempt} attempts)`
+        if (TRANSIENT_NET.test(String(err && err.message))) err.message += await requestSize(page, url)
         throw err
       }
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
     }
+  }
+}
+
+// bd-b2e1ev: a server that closes a connection without answering (and without logging) may be
+// refusing the request's size. The size of the Cookie header the browser would send, and of the
+// URL, rides in the failure so that is told apart from a dead route.
+async function requestSize(page, url) {
+  try {
+    const cookies = await page.context().cookies(url)
+    const header = cookies.map((c) => `${c.name}=${c.value}`).join("; ")
+    return ` [request: url ${url.length} bytes, ${cookies.length} cookies = ${header.length} bytes of Cookie header]`
+  } catch (_) {
+    return ""
   }
 }
 

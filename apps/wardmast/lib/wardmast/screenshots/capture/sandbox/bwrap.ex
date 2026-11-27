@@ -96,10 +96,11 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   # Runs inside the app's sandbox: start the relay on fd 3, close fd 3, exec the app. The relay
   # keeps stderr (its own failure is worth the boot's tail) but not the app's stdout.
   @relay_sh ~S"""
-  perl=$1 relay=$2 port=$3 socat=$4
-  shift 4
+  perl=$1 relay=$2 port=$3 socat=$4 watch=$5
+  shift 5
   "$perl" -e "$relay" "$port" "$socat" >/dev/null &
   exec 3<&-
+  "$perl" -e "$watch" >&2 &
   exec "$@"
   """
 
@@ -124,6 +125,30 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
       exec { $socat } 'socat', '-', "TCP:127.0.0.1:$port" or exit 127;
     }
     close $conn;
+  }
+  """
+
+  # bd-b2e1ev: logs (to the app's own output, so it lands in a failure's server tail) every change
+  # in the sandbox's listening TCP sockets: which address and port each endpoint of the app
+  # really bound, and when. It exits with the sandbox's pid namespace.
+  @watch ~S"""
+  $| = 1;
+  my $last = '';
+  for (1 .. 600) {
+    my @ports;
+    for my $f ('/proc/net/tcp', '/proc/net/tcp6') {
+      open(my $fh, '<', $f) or next;
+      while (<$fh>) {
+        my ($addr, $state) = (split ' ')[1, 3];
+        next unless defined $state and $state eq '0A';
+        my ($ip, $port) = split ':', $addr;
+        push @ports, ($f =~ /6$/ ? 'tcp6 ' : 'tcp ') . $ip . ':' . hex($port);
+      }
+    }
+    my $now = join(', ', sort @ports);
+    print STDERR "capture sandbox: listening sockets: $now\n" if $now ne $last;
+    $last = $now;
+    select(undef, undef, undef, 0.5);
   }
   """
 
@@ -329,7 +354,17 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
     [t.perl, "-e", @listen, socket, t.bwrap | sandbox_args(app_mounts(box), host)] ++
       ["--chdir", box.checkout, "--"] ++
       services_prelude(box, host) ++
-      [t.sh, "-c", @relay_sh, "sh", t.perl, @relay, Integer.to_string(port), t.socat | argv]
+      [
+        t.sh,
+        "-c",
+        @relay_sh,
+        "sh",
+        t.perl,
+        @relay,
+        Integer.to_string(port),
+        t.socat,
+        @watch | argv
+      ]
   end
 
   @doc false

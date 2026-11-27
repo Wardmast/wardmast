@@ -182,12 +182,18 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
                relay,
                "32123",
                "/usr/bin/socat",
+               watch,
                "sh",
                "-c",
                "mix phx.server"
              ] = after_sep
 
       assert relay_sh =~ "3<&-"
+      # bd-b2e1ev: the app's listening sockets are logged to its output, so a boot's tail shows
+      # which address and port each endpoint really bound.
+      assert relay_sh =~ "\$watch"
+      assert watch =~ "/proc/net/tcp"
+      assert watch =~ "listening sockets"
       assert relay =~ "accept("
       assert relay =~ "TCP:127.0.0.1:"
     end
