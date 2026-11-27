@@ -1915,7 +1915,6 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       forge = start_forge(ctx, rig, [:running])
       restart_during_wait(ctx, rig)
       interrupt_implement_runs(rig)
-      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
 
       assert {:ok, gate} =
                ReviewGate.rearm_ci_wait(
@@ -1928,6 +1927,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
                )
 
       wait_until(fn -> awaiting_ci?(gate) end)
+      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
       set_pipeline(forge, [:failed, :running, :failed])
 
       wait_until(fn -> :sys.get_state(gate).local_hold != nil end, 20_000)
