@@ -29,6 +29,8 @@ defmodule Wardmast.Screenshots.Config do
   @name ~r/\A[a-z0-9-]{1,20}\z/
   @worker_range {20_000, 29_999}
   @max_memory_gib 16
+  @default_ephemeral_range {32_768, 60_999}
+  @ephemeral_proc "/proc/sys/net/ipv4/ip_local_port_range"
 
   @default_viewports %{
     "desktop" => %{"width" => 1280, "height" => 800, "device_scale_factor" => 1},
@@ -90,7 +92,7 @@ defmodule Wardmast.Screenshots.Config do
             seed_cmd: nil,
             seeds: %{},
             port_env: "PORT",
-            port_range: {32_000, 32_999},
+            port_range: {30_000, 31_999},
             base_url: "http://127.0.0.1:{{port}}",
             env: %{},
             ready: %{"path" => "/", "timeout_seconds" => 120, "expect" => "below_500"},
@@ -227,7 +229,7 @@ defmodule Wardmast.Screenshots.Config do
 
   defp build(block) do
     d = %__MODULE__{}
-    {:ok, range} = parse_range(Map.get(block, "port_range", "32000-32999"))
+    {:ok, range} = parse_range(Map.get(block, "port_range", "30000-31999"))
 
     %__MODULE__{
       ui_paths: block["ui_paths"],
@@ -490,7 +492,38 @@ defmodule Wardmast.Screenshots.Config do
     cond do
       lo < 1024 or hi > 65_535 -> ["#{label} must lie within 1024-65535"]
       lo <= whi and hi >= wlo -> ["#{label} overlaps the worker dev-server range #{wlo}-#{whi}"]
-      true -> []
+      true -> ephemeral_errors(lo, hi, label)
+    end
+  end
+
+  # The app runs in its own network namespace, where its DB/S3 client sockets take ephemeral
+  # local ports: a capture port picked inside that range can already be held (eaddrinuse).
+  defp ephemeral_errors(lo, hi, label) do
+    {elo, ehi} = ephemeral_range()
+
+    if lo <= ehi and hi >= elo,
+      do: [
+        "#{label} overlaps the host's ephemeral port range #{elo}-#{ehi} " <>
+          "(#{@ephemeral_proc}), where the app's own client sockets can hold the port; " <>
+          "choose a range below #{elo}, outside #{elem(@worker_range, 0)}-#{elem(@worker_range, 1)}"
+      ],
+      else: []
+  end
+
+  @doc """
+  The host's ephemeral (local) port range from `/proc/sys/net/ipv4/ip_local_port_range`,
+  falling back to `32768-60999` when it cannot be read or parsed.
+  """
+  @spec ephemeral_range() :: {pos_integer(), pos_integer()}
+  def ephemeral_range do
+    with {:ok, text} <- File.read(@ephemeral_proc),
+         [lo, hi] <- String.split(text),
+         {lo, ""} <- Integer.parse(lo),
+         {hi, ""} <- Integer.parse(hi),
+         true <- lo <= hi do
+      {lo, hi}
+    else
+      _ -> @default_ephemeral_range
     end
   end
 
@@ -1114,7 +1147,7 @@ defmodule Wardmast.Screenshots.Config do
 
   # The app's own port is picked from `port_range`, inside the same sandbox namespace.
   defp service_range_errors(%{"services" => %{} = services} = block, label) do
-    case parse_range(Map.get(block, "port_range", "32000-32999")) do
+    case parse_range(Map.get(block, "port_range", "30000-31999")) do
       {:ok, {lo, hi}} ->
         for {name, %{"port" => port}} <- Enum.sort(services),
             is_integer(port) and port in lo..hi do

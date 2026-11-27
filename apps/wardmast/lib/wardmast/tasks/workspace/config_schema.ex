@@ -697,7 +697,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         seed_cmd         runs after setup on every boot
                         seeds            map name -> command, picked by plans
                         port_env         default "PORT"
-                        port_range       default "32000-32999"; never the worker range
+                        port_range       default "30000-31999"; never the worker range
                         base_url         default "http://127.0.0.1:{{port}}"; loopback only
                         env              map of variables; no proxy vars, no scrubbed
                                          credential keys, no non-loopback URLs

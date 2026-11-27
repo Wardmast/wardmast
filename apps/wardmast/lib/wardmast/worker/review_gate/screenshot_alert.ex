@@ -45,7 +45,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotAlert do
         kind: @kind,
         key: key(state, cause),
         workspace_id: Map.get(state, :workspace_id),
-        subject: "UI screenshot capture failing for #{repo_label} (#{cause})",
+        subject:
+          "UI screenshot capture failing for #{repo_label} (#{cause})" <> error_suffix(failure),
         detail:
           "UI screenshots could not be captured for #{repo_label} (ticket #{task_id}): " <>
             "#{failure.message}. The review went ahead without screenshots; this is not the " <>
@@ -64,6 +65,29 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotAlert do
     e ->
       Logger.warning("ScreenshotAlert: could not raise: #{Exception.message(e)}")
       :ok
+  end
+
+  # The last `** (` / error line of the app's output, so the subject names the real cause rather
+  # than the first line ("Compiling 628 files").
+  defp error_suffix(%Failure{code: :boot_failed, detail: detail}) do
+    text = Map.get(detail || %{}, :output) || Map.get(detail || %{}, :log_tail)
+
+    with text when is_binary(text) <- text,
+         line when is_binary(line) <- last_error_line(text) do
+      ": " <> String.slice(line, 0, 200)
+    else
+      _ -> ""
+    end
+  end
+
+  defp error_suffix(_failure), do: ""
+
+  defp last_error_line(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.filter(&(&1 =~ ~r/\*\* \(|\berror\b|\bfailed\b|eaddrinuse/i))
+    |> List.last()
   end
 
   @doc "A capture worked for `state`'s repo: its alerts are over."

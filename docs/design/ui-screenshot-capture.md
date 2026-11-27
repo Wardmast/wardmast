@@ -713,7 +713,7 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
     "seed_cmd":  "mix run priv/repo/screenshot_seeds.exs",               // runs after setup, every boot
     "seeds": {"empty": "mix run priv/repo/seeds_empty.exs"},             // named, picked by plans
     "port_env": "PORT",                      // default PORT
-    "port_range": "32000-32999",             // default; picks the in-pod port (never leased)
+    "port_range": "30000-31999",             // default; picks the in-pod port (never leased)
     "base_url": "http://127.0.0.1:{{port}}", // default; host must be 127.0.0.1 or localhost
     "env": {"DATABASE_PATH": "{{scratch}}/{{role}}.sqlite3", "PHX_HOST": "127.0.0.1"},
 
