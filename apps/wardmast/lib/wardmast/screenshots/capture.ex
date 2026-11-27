@@ -620,25 +620,43 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   # A transport failure (empty or reset response) is probed from the host too, on the path the
-  # browser was loading: the answer lands next to the app's own output in the failure.
+  # browser was loading: the answer lands next to the app's own output in the failure. The probe
+  # section is ALWAYS present for a transport failure (bd-b2e1ev): when the booter cannot probe, or
+  # the probe crashes, the section says so, so an absent probe is never mistaken for a probe that
+  # was not attempted.
   defp failure_log(st, spec, target, reason, path) do
     log = server_log(st, spec, target)
 
-    with true <- transport_failure?(reason),
-         true <- function_exported?(st.booter, :diagnose, 3),
-         probe when is_binary(probe) <-
-           safe_call(
-             fn -> st.booter.diagnose(spec, target.handle, failing_path(reason, path)) end,
-             nil
-           ) do
+    if transport_failure?(reason) do
+      probe = host_probe(st, spec, target, failing_path(reason, path))
       String.trim("#{log}\n--- host probe ---\n#{String.replace_invalid(probe)}")
     else
-      _ -> log
+      log
+    end
+  end
+
+  defp host_probe(st, spec, target, probe_path) do
+    if Code.ensure_loaded?(st.booter) and function_exported?(st.booter, :diagnose, 3) do
+      case safe_call(fn -> st.booter.diagnose(spec, target.handle, probe_path) end, :crashed) do
+        probe when is_binary(probe) ->
+          probe
+
+        :crashed ->
+          Logger.warning("Screenshots.Capture: the host probe of #{probe_path} crashed")
+          "host probe of #{probe_path} crashed"
+
+        _ ->
+          "host probe unavailable: the app handle cannot be probed from the host"
+      end
+    else
+      "host probe unavailable: the booter #{inspect(st.booter)} has no diagnose/3"
     end
   end
 
   defp transport_failure?({:shot, detail}),
-    do: detail_text(detail) =~ ~r/net::ERR_(EMPTY_RESPONSE|CONNECTION_)/
+    do:
+      detail_text(detail) =~
+        ~r/net::ERR_(EMPTY_RESPONSE|CONNECTION_|SOCKET_NOT_CONNECTED|CONTENT_LENGTH_MISMATCH|INCOMPLETE_CHUNKED_ENCODING)/
 
   defp transport_failure?(_), do: false
 

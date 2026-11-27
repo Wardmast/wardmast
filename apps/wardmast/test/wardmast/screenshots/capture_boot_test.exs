@@ -152,6 +152,26 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     assert Enum.map(result.boots, & &1["role"]) == ["before", "after"]
   end
 
+  test "a shot's ERR_EMPTY_RESPONSE on the real command booter records the host probe (bd-b2e1ev)",
+       %{tmp_dir: dir} do
+    repo = repo!(dir, ["/"], ["/", "/settings/members"])
+    plan = plan!(dir, [%{"id" => "members", "path" => "/settings/members"}])
+
+    ctx = %{
+      test_pid: self(),
+      shoot_error:
+        {:shot, "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/settings/members"}
+    }
+
+    assert {:error, failure} =
+             run(dir, repo, plan, config(), shooter: Wardmast.Test.CaptureStubShooter, ctx: ctx)
+
+    assert failure.code == :shot_failed
+    assert failure.server_log =~ "--- host probe ---"
+    assert failure.server_log =~ "GET /settings/members"
+    assert failure.server_log =~ "status "
+  end
+
   test "the app is not left running", %{tmp_dir: dir} do
     repo = repo!(dir, ["/"], ["/", "/x"])
     parent = self()
