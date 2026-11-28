@@ -115,7 +115,10 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
         session_opts = resume(unquote(fun), task)
 
         assert File.read!(staged(wt)) == "page-1"
-        assert inspect(session_opts) =~ ".arbiter/visual-actual/page-chromium-linux.png"
+
+        assert Keyword.fetch!(session_opts, :prompt) =~
+                 ".arbiter/visual-actual/page-chromium-linux.png"
+
         assert File.read!(Path.join(wt, "e2e/page-chromium-linux.png")) == "page-0"
         {log, 0} = System.cmd("git", ["log", "--name-only", "--format="], cd: wt)
         refute log =~ "visual-actual"
@@ -176,7 +179,29 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
       session_opts = implement(task)
 
       assert File.read!(staged(wt)) == "page-1"
-      assert inspect(session_opts) =~ ".arbiter/visual-actual/page-chromium-linux.png"
+
+      assert Keyword.fetch!(session_opts, :prompt) =~
+               ".arbiter/visual-actual/page-chromium-linux.png"
+    end
+
+    test "a new spec with no baseline yet still gets its images, as new baselines" do
+      %{task: task, wt: wt, head: head} = parked!(true)
+
+      StubMerger.set_job_artifacts(
+        {:ok,
+         %{
+           sha: head,
+           failed_jobs: ["visual"],
+           archive: archive([{"test-results/a/fresh-actual.png", "fresh-1"}])
+         }}
+      )
+
+      session_opts = implement(task)
+
+      assert File.read!(Path.join(wt, ".arbiter/visual-actual/fresh-chromium-linux.png")) ==
+               "fresh-1"
+
+      assert Keyword.fetch!(session_opts, :prompt) =~ "e2e/fresh-chromium-linux.png"
     end
 
     test "no delivery when the visual job did not fail" do

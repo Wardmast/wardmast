@@ -154,7 +154,7 @@ defmodule Wardmast.Worker.VisualBaselines do
     with :ok <- hand_off_supported(adapter),
          :ok <- present([head]),
          {:ok, archive} <- hand_off_artifacts(adapter, mr_ref, config, head),
-         {:ok, plan} <- plan(archive, config, checkout) do
+         {:ok, plan} <- plan(archive, config, checkout, allow_new: true) do
       write_hand_off(plan, config, checkout)
     end
   end
@@ -409,8 +409,8 @@ defmodule Wardmast.Worker.VisualBaselines do
   defp verdict(:ok), do: :ok
   defp verdict({:skip, reason}), do: {:skip, reason}
 
-  defp plan(archive, config, path) do
-    case Archive.plan(archive, config, path) do
+  defp plan(archive, config, path, opts \\ []) do
+    case Archive.plan(archive, config, path, opts) do
       {:ok, plan} -> {:ok, plan}
       {:error, reason} -> {:skip, reason}
     end
