@@ -9,7 +9,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
   destination is found in the checkout instead — the one file under
   `baseline_dir` called `<name><baseline_suffix>`. Anything that cannot be mapped
   to exactly one existing baseline refuses the whole plan (a new snapshot with no
-  baseline, two baselines by the same name, two actuals for one snapshot): the
+  baseline (except for `allow_new: true`, the hand-off, which stages it under its would-be path), two baselines by the same name, two actuals for one snapshot): the
   caller then takes the normal fix path.
 
   With `layout: "playwright"` the name is the screenshot argument and the
@@ -43,12 +43,14 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
   The baselines to overwrite, as repo-relative paths with the new bytes. Actuals
   already equal to their baseline are left out; `:no_change` when none differ.
   """
-  @spec plan(binary(), Config.t(), String.t()) :: {:ok, [entry()]} | {:error, error()}
-  def plan(archive, %Config{} = config, checkout) when is_binary(archive) do
+  @spec plan(binary(), Config.t(), String.t(), keyword()) :: {:ok, [entry()]} | {:error, error()}
+  def plan(archive, %Config{} = config, checkout, opts \\ []) when is_binary(archive) do
+    allow_new = Keyword.get(opts, :allow_new, false)
+
     with {:ok, files} <- unzip(archive),
          {:ok, actuals} <- actuals(files, config),
          :ok <- if(config.layout == "playwright", do: :ok, else: within_cap(actuals, config)),
-         {:ok, entries} <- map_baselines(actuals, config, checkout),
+         {:ok, entries} <- map_baselines(actuals, config, checkout, allow_new),
          :ok <- within_cap(entries, config) do
       case Enum.reject(entries, &unchanged?(&1, checkout)) do
         [] -> {:error, :no_change}
@@ -99,16 +101,22 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
     if length(entries) > max, do: {:error, {:too_many, length(entries), max}}, else: :ok
   end
 
-  defp map_baselines(actuals, config, checkout) do
+  defp map_baselines(actuals, config, checkout, allow_new) do
     root = Path.join(checkout, config.baseline_dir)
     existing = if File.dir?(root), do: list_files(root), else: []
 
-    with {:ok, resolved} <- resolve(actuals, config, existing) do
+    with {:ok, resolved} <- resolve(actuals, config, existing, allow_new) do
       resolved
       |> Enum.reduce_while({:ok, []}, fn {name, wanted, bytes, diff}, {:ok, acc} ->
-        case Enum.filter(existing, &wanted.(Path.basename(&1))) do
+        case Enum.filter(existing, &(Path.basename(&1) == wanted)) do
           [one] ->
             rel = Path.relative_to(one, checkout)
+            {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes, diff: diff} | acc]}}
+
+          [] when allow_new ->
+            # Hand-off only: a snapshot with no baseline yet (a new spec) is staged
+            # under the path its baseline would have.
+            rel = Path.join(config.baseline_dir, wanted)
             {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes, diff: diff} | acc]}}
 
           [] ->
@@ -126,7 +134,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
   end
 
   # One `{name, basename_matcher, bytes, diff}` per snapshot to refresh.
-  defp resolve(actuals, %{layout: "playwright"} = config, existing) do
+  defp resolve(actuals, %{layout: "playwright"} = config, existing, allow_new) do
     basenames = Enum.map(existing, &Path.basename/1)
     args = actuals |> Enum.map(& &1.name) |> Enum.uniq()
 
@@ -134,14 +142,14 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
     |> Enum.group_by(& &1.name)
     |> Enum.sort()
     |> Enum.reduce_while({:ok, []}, fn {arg, group}, {:ok, acc} ->
-      case playwright_group(arg, group, basenames, args, config) do
+      case playwright_group(arg, group, basenames, args, config, allow_new) do
         {:ok, items} -> {:cont, {:ok, acc ++ items}}
         error -> {:halt, error}
       end
     end)
   end
 
-  defp resolve(actuals, config, _existing) do
+  defp resolve(actuals, config, _existing, _allow_new) do
     names = Enum.map(actuals, & &1.name)
 
     case Enum.find(names, &(Enum.count(names, fn n -> n == &1 end) > 1)) do
@@ -149,7 +157,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
         {:ok,
          Enum.map(actuals, fn a ->
            wanted = a.name <> config.baseline_suffix
-           {a.name, &(&1 == wanted), a.bytes, a.diff}
+           {a.name, wanted, a.bytes, a.diff}
          end)}
 
       dup ->
@@ -157,7 +165,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
     end
   end
 
-  defp playwright_group(arg, group, basenames, args, config) do
+  defp playwright_group(arg, group, basenames, args, config, allow_new) do
     tail = "-" <> config.platform <> ".png"
 
     projects =
@@ -180,6 +188,10 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
         |> Enum.filter(&project_of?(base, &1))
         |> Enum.max_by(&byte_size/1, fn -> nil end)
 
+      # No baseline to learn the project from (a new snapshot): in hand-off mode
+      # take the last dash-separated segment of the results directory name.
+      project = project || if(allow_new, do: base |> String.split("-") |> List.last())
+
       {project, base, retry, a.bytes, a.diff}
     end)
     |> Enum.group_by(&elem(&1, 0))
@@ -192,7 +204,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
           [_one] ->
             {_, _, _, bytes, diff} = Enum.max_by(runs, &elem(&1, 2))
             wanted = arg <> "-" <> project <> tail
-            {:cont, {:ok, [{arg <> "-" <> project, &(&1 == wanted), bytes, diff} | acc]}}
+            {:cont, {:ok, [{arg <> "-" <> project, wanted, bytes, diff} | acc]}}
 
           _many ->
             {:halt, {:error, {:duplicate_actual, arg <> "-" <> project}}}

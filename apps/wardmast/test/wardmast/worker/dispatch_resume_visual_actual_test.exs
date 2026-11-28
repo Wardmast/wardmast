@@ -115,7 +115,10 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
         session_opts = resume(unquote(fun), task)
 
         assert File.read!(staged(wt)) == "page-1"
-        assert inspect(session_opts) =~ ".arbiter/visual-actual/page-chromium-linux.png"
+
+        assert Keyword.fetch!(session_opts, :prompt) =~
+                 ".arbiter/visual-actual/page-chromium-linux.png"
+
         assert File.read!(Path.join(wt, "e2e/page-chromium-linux.png")) == "page-0"
         {log, 0} = System.cmd("git", ["log", "--name-only", "--format="], cd: wt)
         refute log =~ "visual-actual"
@@ -143,6 +146,69 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
         resume(unquote(fun), task)
         refute File.exists?(staged(wt))
       end
+    end
+  end
+
+  describe "implement run (a plain dispatch, not a resume) of a ticket with a PR" do
+    defp implement(task) do
+      :ok = Issue.back_to_work(task.id)
+      test = self()
+
+      opts = [
+        force: true,
+        repo: @repo,
+        start_driver: false,
+        start_claude: true,
+        ci_adapter: StubMerger,
+        claude_start: fn session_opts ->
+          send(test, {:spawned, session_opts})
+          {:ok, :captured}
+        end
+      ]
+
+      assert {:ok, %{worker_pid: pid}} = Dispatch.dispatch(task.id, opts)
+      on_exit(fn -> if Process.alive?(pid), do: Worker.stop(pid, :normal) end)
+      assert_receive {:spawned, session_opts}
+      session_opts
+    end
+
+    test "gets the head's images before the agent starts, and the brief names them" do
+      %{task: task, wt: wt, head: head} = parked!(true)
+      artifacts(head)
+
+      session_opts = implement(task)
+
+      assert File.read!(staged(wt)) == "page-1"
+
+      assert Keyword.fetch!(session_opts, :prompt) =~
+               ".arbiter/visual-actual/page-chromium-linux.png"
+    end
+
+    test "a new spec with no baseline yet still gets its images, as new baselines" do
+      %{task: task, wt: wt, head: head} = parked!(true)
+
+      StubMerger.set_job_artifacts(
+        {:ok,
+         %{
+           sha: head,
+           failed_jobs: ["visual"],
+           archive: archive([{"test-results/a/fresh-actual.png", "fresh-1"}])
+         }}
+      )
+
+      session_opts = implement(task)
+
+      assert File.read!(Path.join(wt, ".arbiter/visual-actual/fresh-chromium-linux.png")) ==
+               "fresh-1"
+
+      assert Keyword.fetch!(session_opts, :prompt) =~ "e2e/fresh-chromium-linux.png"
+    end
+
+    test "no delivery when the visual job did not fail" do
+      %{task: task, wt: wt, head: head} = parked!(true)
+      artifacts(head, ["lint"])
+      implement(task)
+      refute File.exists?(staged(wt))
     end
   end
 

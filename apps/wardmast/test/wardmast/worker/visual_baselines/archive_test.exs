@@ -105,6 +105,18 @@ defmodule Wardmast.Worker.VisualBaselines.ArchiveTest do
   end
 
   describe "playwright layout" do
+    test "allow_new stages a snapshot with no baseline under its would-be path (playwright)", %{
+      tmp_dir: dir
+    } do
+      archive = zip([{"test-results/app.visual-mobile-dark/fresh-actual.png", "new"}])
+
+      assert {:error, {:no_baseline, "fresh"}} = Archive.plan(archive, pw_config(), dir)
+
+      assert {:ok, [e]} = Archive.plan(archive, pw_config(), dir, allow_new: true)
+      assert e.baseline == "test/visual/tests/__screenshots__/fresh-dark-linux.png"
+      assert e.bytes == "new"
+    end
+
     @shots "test/visual/tests/__screenshots__/app.visual.spec.ts"
     @results "test-results/app.visual-mobile-application-patient-summary"
 
