@@ -154,6 +154,8 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
 
   test "a visual hand-off is staged in the pass's checkout, and nothing is committed", ctx do
     stage = fn path ->
+      # Delivery is finished before the pass has a worker, let alone an agent.
+      nil = Worker.whereis(ctx.issue.id)
       File.mkdir_p!(Path.join(path, ".arbiter/visual-actual"))
       File.write!(Path.join(path, ".arbiter/visual-actual/a.png"), "png")
       {:ok, [%{baseline: "e2e/a.png", actual: "a.png", diff: nil}]}

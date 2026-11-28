@@ -700,6 +700,19 @@ defmodule Wardmast.Worker.Dispatch do
 
   defp visual_actual_brief(_task, _repo, _worktree_path, _opts), do: ""
 
+  # GitHub #1678: a plain (implement) run of a ticket whose branch already has a PR gets the
+  # same delivery as a resume, synchronously, before the agent is spawned. Resume paths
+  # have staged theirs already (`:resume` / `:visual_actual_brief` / `:resume_context`
+  # set by then), so they are left alone, as are runs with no branch worktree.
+  defp stage_implement_visual_actual(task, worktree_path, opts) do
+    if Keyword.get(opts, :resume) != true and is_binary(worktree_path) and
+         is_binary(Keyword.get(opts, :repo)) do
+      put_visual_actual(opts, visual_actual_brief(task, opts[:repo], worktree_path, opts))
+    else
+      opts
+    end
+  end
+
   defp append_visual_actual(context, ""), do: context
   defp append_visual_actual(context, brief), do: (context || "") <> "\n" <> brief
 
@@ -4831,6 +4844,8 @@ defmodule Wardmast.Worker.Dispatch do
             {:error, reason}
 
           {:ok, path, opts} when is_binary(path) ->
+            opts = stage_implement_visual_actual(task, worktree_path, opts)
+
             # Inject the per-spawn MCP config (.mcp.json) into the *isolated*
             # worktree so the agent can read its task / mailbox and write
             # completion notes as typed tool calls. Best-effort: never blocks
